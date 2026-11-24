@@ -18,6 +18,8 @@ _musicctl() {
     'shuffle:Shuffle active mpv queue'
     'loop:Cycle or set repeat mode'
     'mute:Toggle mute'
+    'eq:Set parametric EQ preset'
+    'norm:Toggle EBU R128 loudness normalization'
     'speed:Set playback speed'
     'vol:Set or adjust volume'
     'seek:Relative seek in seconds'
@@ -79,6 +81,12 @@ _musicctl() {
       ;;
     clear)
       _values 'option' --all
+      ;;
+    eq)
+      _values 'preset' flat bass warm vocal bright rock cycle status
+      ;;
+    norm)
+      _values 'action' on off toggle status
       ;;
     play|add)
       _files

@@ -56,6 +56,8 @@ musicctl clear [--all]          # Clear upcoming queue (or --all incl. current)
 musicctl shuffle                # Shuffle active mpv queue
 musicctl loop [off|one|all]     # Cycle or set repeat mode
 musicctl mute                   # Toggle mute
+musicctl eq [preset|cycle]      # Set EQ (flat/bass/warm/vocal/bright/rock)
+musicctl norm [on|off|toggle]   # Toggle EBU R128 loudness normalization
 musicctl speed <0.25..4.0|reset># Set playback speed
 musicctl vol 80                 # Set volume (supports +10 / -10)
 musicctl seek +15               # Seek relative seconds
@@ -96,6 +98,8 @@ musicctl stop                   # Save session and stop background mpv daemon
 | `Alt-L` | View plain lyrics (`less -R`) |
 | `Alt-K` | Launch live synced lyrics watcher |
 | `Alt-M` | Toggle mute |
+| `Alt-E` | Cycle EQ preset (`flat`/`bass`/`warm`/`vocal`/`bright`/`rock`) |
+| `Alt-N` | Toggle EBU R128 loudness normalization |
 | `Alt-=` / `Alt--` | Volume `+5%` / `-5%` |
 | `Alt-Right` / `Alt-Left` | Seek `+10s` / `-10s` |
 
@@ -108,6 +112,8 @@ MUSICCTL_CACHE=1
 MUSICCTL_NOTIFY=1
 MUSICCTL_ART=1
 MUSICCTL_ART_FORMAT=symbols
+MUSICCTL_EQ=flat
+MUSICCTL_NORM=0
 MUSICCTL_DOWNLOAD_DIR="$HOME/Music/musicctl"
 ```
 

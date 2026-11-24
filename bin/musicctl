@@ -7,7 +7,7 @@
 set -uo pipefail
 
 SELF_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
-MUSICCTL_VERSION="1.0.0"
+MUSICCTL_VERSION="1.1.0"
 MUSICCTL_CONFIG="${MUSICCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/config}"
 
 load_user_config() {
@@ -29,7 +29,7 @@ load_user_config() {
     case "$key" in
       MUSICCTL_SOCKET|MUSICCTL_DATA_DIR|MUSICCTL_CACHE_DIR|MUSICCTL_CACHE|\
       MUSICCTL_DOWNLOAD_DIR|MUSICCTL_NOTIFY|MUSICCTL_ART|MUSICCTL_ART_FORMAT|\
-      MUSICCTL_MPV_EXTRA_ARGS)
+      MUSICCTL_EQ|MUSICCTL_NORM|MUSICCTL_MPV_EXTRA_ARGS)
         if [[ -z "${!key+x}" ]]; then
           printf -v "$key" '%s' "$val"
         fi
@@ -49,6 +49,7 @@ FAV_FILE="$MUSICCTL_DATA_DIR/favorites.tsv"
 HIST_FILE="$MUSICCTL_DATA_DIR/history.tsv"
 PLAYLIST_DIR="$MUSICCTL_DATA_DIR/playlists"
 SLEEP_STATE="$MUSICCTL_DATA_DIR/sleep.state"
+AUDIO_STATE="$MUSICCTL_DATA_DIR/audio.state"
 SESSION_FILE="$MUSICCTL_DATA_DIR/session.json"
 MPV_LOG="$MUSICCTL_DATA_DIR/mpv.log"
 MUSICCTL_MPV_EXTRA_ARGS="${MUSICCTL_MPV_EXTRA_ARGS:-}"
@@ -57,6 +58,8 @@ MUSICCTL_CACHE="${MUSICCTL_CACHE:-0}"
 MUSICCTL_NOTIFY="${MUSICCTL_NOTIFY:-1}"
 MUSICCTL_ART="${MUSICCTL_ART:-1}"
 MUSICCTL_ART_FORMAT="${MUSICCTL_ART_FORMAT:-symbols}"
+MUSICCTL_EQ="${MUSICCTL_EQ:-flat}"
+MUSICCTL_NORM="${MUSICCTL_NORM:-0}"
 
 # ANSI Styling Tokens (Tokyo Night Theme, matching gamectl)
 UI_RST=$'\033[0m'
@@ -225,10 +228,21 @@ ensure_daemon() {
     --force-window=no
     --keep-open=no
     --audio-display=no
+    --gapless-audio=yes
+    --audio-pitch-correction=yes
+    --volume-max=130
+    --replaygain=track
     --input-ipc-server="$MUSICCTL_SOCKET"
-    --ytdl-format=bestaudio/best
-    --ytdl-raw-options=no-playlist=
+    --ytdl-format=251/bestaudio[acodec=opus]/bestaudio/best
+    --ytdl-raw-options=ignore-config=,no-playlist=,no-update=
   )
+
+  local cur_eq cur_norm af_chain
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
+  af_chain="$(build_af_chain "$cur_eq" "$cur_norm")"
+  if [[ -n "$af_chain" ]]; then
+    args+=(--af="$af_chain")
+  fi
 
   local mpris_path=""
   mpris_path="$(find_mpris_script || true)"
@@ -320,7 +334,7 @@ ytm_search() {
   fi
 
   if [[ -z "$parsed" ]]; then
-    parsed="$(yt-dlp --flat-playlist --no-update --print '%(id)s	%(title)s	%(channel)s • %(duration_string)s' "ytsearch10:$query" 2>/dev/null \
+    parsed="$(yt-dlp --ignore-config --flat-playlist --no-update --print '%(id)s	%(title)s	%(channel)s • %(duration_string)s' "ytsearch10:$query" 2>/dev/null \
       | awk -F'\t' 'NF>=2 && !seen[$1]++' | head -n 25 || true)"
   fi
 
@@ -429,7 +443,7 @@ cache_audio_bg() {
   mkdir "$lock_dir" 2>/dev/null || return 0
   setsid bash -c '
     trap "rmdir \"$3\" 2>/dev/null || true" EXIT
-    yt-dlp --no-playlist --no-update -q -x --audio-format opus --embed-metadata \
+    yt-dlp --ignore-config --no-playlist --no-update -q -f "251/bestaudio[acodec=opus]/bestaudio/best" -x --audio-format opus --audio-quality 0 --embed-metadata \
       -o "$2/$1.%(ext)s" "https://www.youtube.com/watch?v=$1" >/dev/null 2>&1
   ' _ "$id" "$CACHE_AUDIO_DIR" "$lock_dir" </dev/null >/dev/null 2>&1 &
   disown "$!" 2>/dev/null || true
@@ -705,6 +719,135 @@ cmd_shuffle() {
   daemon_alive || die "Daemon not running"
   mpv_cmd '["playlist-shuffle"]' >/dev/null
   printf '%s[OK]%s Queue shuffled\n' "$UI_GREEN" "$UI_RST"
+}
+
+# ------------------------------------------------------------------------------
+# Parametric EQ & EBU R128 Loudness Normalization
+# ------------------------------------------------------------------------------
+
+audio_state_get() {
+  local eq="$MUSICCTL_EQ" norm="$MUSICCTL_NORM"
+  if [[ -f "$AUDIO_STATE" ]]; then
+    local f_eq f_norm
+    IFS=: read -r f_eq f_norm <"$AUDIO_STATE" 2>/dev/null || true
+    [[ -n "${f_eq:-}" ]] && eq="$f_eq"
+    [[ -n "${f_norm:-}" ]] && norm="$f_norm"
+  fi
+  case "$eq" in
+    flat|bass|warm|vocal|bright|rock) ;;
+    *) eq="flat" ;;
+  esac
+  [[ "$norm" == "1" ]] || norm="0"
+  printf '%s:%s' "$eq" "$norm"
+}
+
+audio_state_set() {
+  init_storage
+  printf '%s:%s\n' "$1" "$2" >"$AUDIO_STATE"
+}
+
+build_af_chain() {
+  local eq="${1:-flat}"
+  local norm="${2:-0}"
+  local -a parts=()
+  case "$eq" in
+    flat) ;;
+    bass)
+      parts+=("volume=-3dB,equalizer=f=60:t=q:w=1.0:g=4.5,equalizer=f=130:t=q:w=1.1:g=2.5,equalizer=f=300:t=q:w=1.2:g=0.5")
+      ;;
+    warm)
+      parts+=("volume=-2.5dB,equalizer=f=80:t=q:w=1.0:g=3,equalizer=f=250:t=q:w=1.0:g=1.5,equalizer=f=6000:t=q:w=1.2:g=-1.5")
+      ;;
+    vocal)
+      parts+=("volume=-2dB,equalizer=f=120:t=q:w=1.0:g=-1.5,equalizer=f=1000:t=q:w=1.2:g=2.5,equalizer=f=3000:t=q:w=1.2:g=3")
+      ;;
+    bright)
+      parts+=("volume=-2.5dB,equalizer=f=3500:t=q:w=1.2:g=2.5,equalizer=f=8000:t=q:w=1.0:g=3.5,equalizer=f=12000:t=q:w=1.0:g=2.5")
+      ;;
+    rock)
+      parts+=("volume=-3dB,equalizer=f=70:t=q:w=1.0:g=3.5,equalizer=f=400:t=q:w=1.2:g=-1.5,equalizer=f=2500:t=q:w=1.2:g=2,equalizer=f=8000:t=q:w=1.0:g=3")
+      ;;
+  esac
+  if [[ "$norm" == "1" ]]; then
+    parts+=("loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000")
+  fi
+  if ((${#parts[@]} == 0)); then
+    printf ''
+    return 0
+  fi
+  local joined
+  joined="$(IFS=,; printf '%s' "${parts[*]}")"
+  printf 'lavfi=[%s]' "$joined"
+}
+
+apply_audio_filters() {
+  local eq="$1" norm="$2"
+  audio_state_set "$eq" "$norm"
+  if daemon_alive; then
+    local af payload
+    af="$(build_af_chain "$eq" "$norm")"
+    payload="$(jq -cn --arg af "$af" '["set_property", "af", $af]')"
+    mpv_cmd "$payload" >/dev/null || die "Failed to apply audio filter: $af"
+  fi
+}
+
+cmd_eq() {
+  local arg="${1:-status}"
+  local cur_eq cur_norm
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
+  case "$arg" in
+    status)
+      printf '%s[INFO]%s EQ: %s (presets: flat, bass, warm, vocal, bright, rock)\n' "$UI_CYAN" "$UI_RST" "$cur_eq"
+      ;;
+    cycle)
+      local next="flat"
+      case "$cur_eq" in
+        flat)   next="bass" ;;
+        bass)   next="warm" ;;
+        warm)   next="vocal" ;;
+        vocal)  next="bright" ;;
+        bright) next="rock" ;;
+        *)      next="flat" ;;
+      esac
+      apply_audio_filters "$next" "$cur_norm"
+      printf '%s[OK]%s EQ: %s\n' "$UI_GREEN" "$UI_RST" "$next"
+      ;;
+    flat|bass|warm|vocal|bright|rock)
+      apply_audio_filters "$arg" "$cur_norm"
+      printf '%s[OK]%s EQ: %s\n' "$UI_GREEN" "$UI_RST" "$arg"
+      ;;
+    *)
+      die "Unknown EQ preset '$arg' (valid: flat, bass, warm, vocal, bright, rock, cycle, status)"
+      ;;
+  esac
+}
+
+cmd_norm() {
+  local arg="${1:-toggle}"
+  local cur_eq cur_norm
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
+  case "$arg" in
+    status)
+      printf '%s[INFO]%s Loudness norm: %s\n' "$UI_CYAN" "$UI_RST" "$([[ "$cur_norm" == "1" ]] && printf 'on' || printf 'off')"
+      ;;
+    toggle)
+      local next="1"
+      [[ "$cur_norm" == "1" ]] && next="0"
+      apply_audio_filters "$cur_eq" "$next"
+      printf '%s[OK]%s Loudness norm: %s\n' "$UI_GREEN" "$UI_RST" "$([[ "$next" == "1" ]] && printf 'on' || printf 'off')"
+      ;;
+    on|1|true)
+      apply_audio_filters "$cur_eq" "1"
+      printf '%s[OK]%s Loudness norm: on\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    off|0|false)
+      apply_audio_filters "$cur_eq" "0"
+      printf '%s[OK]%s Loudness norm: off\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    *)
+      die "Usage: musicctl norm [on|off|toggle|status]"
+      ;;
+  esac
 }
 
 cmd_mute() {
@@ -1162,7 +1305,7 @@ cmd_download() {
   fi
 
   printf '%s[INFO]%s Downloading to %s\n' "$UI_CYAN" "$UI_RST" "$MUSICCTL_DOWNLOAD_DIR"
-  yt-dlp --no-playlist --no-update -x --audio-format opus --embed-metadata \
+  yt-dlp --ignore-config --no-playlist --no-update -f '251/bestaudio[acodec=opus]/bestaudio/best' -x --audio-format opus --audio-quality 0 --embed-metadata \
     -o "$MUSICCTL_DOWNLOAD_DIR/%(artist,uploader)s - %(title)s [%(id)s].%(ext)s" \
     "$url"
 }
@@ -1416,6 +1559,12 @@ cmd_doctor() {
     printf '  %s[IDLE]%s daemon       not running\n' "$UI_DIM" "$UI_RST"
   fi
   printf '  %s[INFO]%s config       %s (%s)\n' "$UI_ICE" "$UI_RST" "$MUSICCTL_CONFIG" "$([[ -f "$MUSICCTL_CONFIG" ]] && printf 'found' || printf 'default')"
+  local cur_eq cur_norm
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
+  printf '  %s[INFO]%s audio dsp    EQ=%s, Norm=%s, Format=251/Opus 48kHz\n' "$UI_ICE" "$UI_RST" "$cur_eq" "$([[ "$cur_norm" == "1" ]] && printf 'on' || printf 'off')"
+  if [[ -f "$HOME/.config/yt-dlp/config" ]] && grep -q 'cookies' "$HOME/.config/yt-dlp/config" 2>/dev/null; then
+    printf '  %s[OK]%s   yt-dlp       --ignore-config active (bypasses global cookie downgrade)\n' "$UI_GREEN" "$UI_RST"
+  fi
   cmd_cache status
 }
 
@@ -1473,12 +1622,15 @@ cmd_status() {
   fi
 
   local loop_mode="off" muted_b="false" speed_v="1" sleep_rem=""
+  local cur_eq cur_norm norm_b="false" codec="" srate="0"
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
+  [[ "$cur_norm" == "1" ]] && norm_b="true"
   sleep_rem="$(sleep_remaining || true)"
 
   if ! daemon_alive; then
     if ((json_mode == 1)); then
-      jq -cn --arg loop "$loop_mode" --arg sleep "$sleep_rem" \
-        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":false,"loop":$loop,"speed":1,"sleep":$sleep,"text":"[IDLE]"}'
+      jq -cn --arg loop "$loop_mode" --arg sleep "$sleep_rem" --arg eq "$cur_eq" --argjson norm "$norm_b" \
+        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":false,"loop":$loop,"speed":1,"codec":"","samplerate":0,"eq":$eq,"norm":$norm,"sleep":$sleep,"text":"[IDLE]"}'
     else
       printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
       [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
@@ -1496,8 +1648,8 @@ cmd_status() {
   idle="$(mpv_get "idle-active" || echo "true")"
   if [[ "$idle" == "true" ]]; then
     if ((json_mode == 1)); then
-      jq -cn --argjson muted "$muted_b" --arg loop "$loop_mode" --argjson speed "$speed_v" --arg sleep "$sleep_rem" \
-        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":$muted,"loop":$loop,"speed":$speed,"sleep":$sleep,"text":"[IDLE]"}'
+      jq -cn --argjson muted "$muted_b" --arg loop "$loop_mode" --argjson speed "$speed_v" --arg eq "$cur_eq" --argjson norm "$norm_b" --arg sleep "$sleep_rem" \
+        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":$muted,"loop":$loop,"speed":$speed,"codec":"","samplerate":0,"eq":$eq,"norm":$norm,"sleep":$sleep,"text":"[IDLE]"}'
     else
       printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
       [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
@@ -1513,6 +1665,9 @@ cmd_status() {
   vol="$(mpv_get "volume" || echo "100")"
   qcount="$(mpv_get "playlist-count" || echo "1")"
   qpos="$(mpv_get "playlist-pos" || echo "0")"
+  codec="$(mpv_get "audio-codec-name" || true)"
+  srate="$(mpv_get "audio-params/samplerate" || echo "0")"
+  [[ "$srate" =~ ^[0-9]+$ ]] || srate="0"
 
   local qhuman=$(( ${qpos:-0} + 1 ))
   local state="playing" badge="[PLAY]" badge_col="$UI_GREEN"
@@ -1541,11 +1696,24 @@ cmd_status() {
       --argjson muted "$muted_b" \
       --arg loop "$loop_mode" \
       --argjson speed "$speed_v" \
+      --arg codec "$codec" \
+      --argjson samplerate "$srate" \
+      --arg eq "$cur_eq" \
+      --argjson norm "$norm_b" \
       --arg sleep "$sleep_rem" \
       --arg text "$badge $title ($pos_s/$dur_s)" \
-      '{state:$state,title:$title,pos:$pos,duration:$duration,volume:$volume,queue_pos:$qpos,queue_count:$qcount,muted:$muted,loop:$loop,speed:$speed,sleep:$sleep,text:$text}'
+      '{state:$state,title:$title,pos:$pos,duration:$duration,volume:$volume,queue_pos:$qpos,queue_count:$qcount,muted:$muted,loop:$loop,speed:$speed,codec:$codec,samplerate:$samplerate,eq:$eq,norm:$norm,sleep:$sleep,text:$text}'
   else
     local extras=""
+    if [[ -n "$codec" ]]; then
+      if ((srate > 0)); then
+        extras+="  |  ${codec} $((srate / 1000))kHz"
+      else
+        extras+="  |  ${codec}"
+      fi
+    fi
+    [[ "$cur_eq" != "flat" ]] && extras+="  |  EQ: $cur_eq"
+    [[ "$norm_b" == "true" ]] && extras+="  |  Norm: on"
     [[ "$muted_b" == "true" ]] && extras+="  |  MUTE"
     [[ "$loop_mode" != "off" ]] && extras+="  |  Loop: $loop_mode"
     [[ "$speed_v" != "1" && "$speed_v" != "1.0" && "$speed_v" != "1.00" ]] && extras+="  |  ${speed_v}x"
@@ -1711,13 +1879,14 @@ cmd_internal_preview() {
   local id title meta tag _qidx
   IFS=$'\t' read -r id title meta tag _qidx <<<"$line"
 
-  local loop_mode muted_b speed_v sleep_rem
+  local loop_mode muted_b speed_v sleep_rem cur_eq cur_norm
   loop_mode="$(get_loop_mode)"
   sleep_rem="$(sleep_remaining || true)"
+  IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
 
   printf '%s╭─ NOW PLAYING ─────────────────────────────────╮%s\n' "$UI_BOX" "$UI_RST"
   if daemon_alive && [[ "$(mpv_get "idle-active" || echo "true")" == "false" ]]; then
-    local paused now_title pos dur vol qcount qpos pos_s dur_s bar state_col state_lbl
+    local paused now_title pos dur vol qcount qpos pos_s dur_s bar state_col state_lbl codec srate khz_lbl
     paused="$(mpv_get "pause" || echo "false")"
     now_title="$(mpv_get "media-title" || true)"
     [[ -n "$now_title" ]] || now_title="$(mpv_get "filename" || echo "Unknown")"
@@ -1728,6 +1897,10 @@ cmd_internal_preview() {
     speed_v="$(mpv_get "speed" || echo "1")"
     qcount="$(mpv_get "playlist-count" || echo "1")"
     qpos="$(mpv_get "playlist-pos" || echo "0")"
+    codec="$(mpv_get "audio-codec-name" || true)"
+    srate="$(mpv_get "audio-params/samplerate" || echo "0")"
+    khz_lbl=""
+    [[ "$srate" =~ ^[1-9][0-9]*$ ]] && khz_lbl=" $((srate / 1000))kHz"
     pos_s="$(format_mmss "$pos")"
     dur_s="$(format_mmss "$dur")"
     bar="$(ascii_bar "$pos" "$dur" 20)"
@@ -1742,6 +1915,10 @@ cmd_internal_preview() {
       "$UI_DIM" "$UI_RST" "${vol%.*}" "$([[ "$muted_b" == "true" ]] && printf ' [MUTE]')" \
       "$UI_DIM" "$UI_RST" "$(( ${qpos:-0} + 1 ))" "${qcount:-1}" \
       "$UI_DIM" "$UI_RST" "$loop_mode"
+    printf ' %sAudio:%s %s%s  %sEQ:%s %s  %sNorm:%s %s\n' \
+      "$UI_DIM" "$UI_RST" "${codec:--}" "$khz_lbl" \
+      "$UI_DIM" "$UI_RST" "$cur_eq" \
+      "$UI_DIM" "$UI_RST" "$([[ "$cur_norm" == "1" ]] && printf 'on' || printf 'off')"
     if [[ "$speed_v" != "1" && "$speed_v" != "1.0" && "$speed_v" != "1.00" ]] || [[ -n "$sleep_rem" ]]; then
       printf ' %sSpeed:%s %sx%s\n' "$UI_DIM" "$UI_RST" "${speed_v:-1}" \
         "$([[ -n "$sleep_rem" ]] && printf '  Sleep: %s' "$sleep_rem")"
@@ -1779,6 +1956,7 @@ cmd_internal_preview() {
   printf ' %sCTRL-R%s Radio  %sCTRL-D%s Local  %sCTRL-B%s Prev\n' "$UI_PURPLE" "$UI_RST" "$UI_ICE" "$UI_RST" "$UI_CYAN" "$UI_RST"
   printf ' %sCTRL-O%s Loop   %sCTRL-U%s Shuf   %sALT-L/K%s Lyrics\n' "$UI_AMBER" "$UI_RST" "$UI_GREEN" "$UI_RST" "$UI_ICE" "$UI_RST"
   printf ' %sALT-M%s Mute    %sALT-=/-%s Vol  %sALT-</>%s Seek\n' "$UI_RED" "$UI_RST" "$UI_GREEN" "$UI_RST" "$UI_CYAN" "$UI_RST"
+  printf ' %sALT-E%s EQ      %sALT-N%s Norm\n' "$UI_PURPLE" "$UI_RST" "$UI_AMBER" "$UI_RST"
 }
 
 cmd_tui() {
@@ -1829,6 +2007,8 @@ cmd_tui() {
     --bind="alt-left:execute-silent(\"$SELF_BIN\" seek -10)+refresh-preview" \
     --bind="alt-l:execute(\"$SELF_BIN\" _lyrics_line {} | less -R)" \
     --bind="alt-k:execute(\"$SELF_BIN\" _lyrics_line --live {})" \
+    --bind="alt-e:execute-silent(\"$SELF_BIN\" eq cycle)+refresh-preview" \
+    --bind="alt-n:execute-silent(\"$SELF_BIN\" norm toggle)+refresh-preview" \
     || true
 }
 
@@ -1855,6 +2035,8 @@ ${UI_BOLD}USAGE${UI_RST}
   musicctl shuffle                Shuffle active mpv queue
   musicctl loop [off|one|all]     Cycle or set repeat mode
   musicctl mute                   Toggle mute
+  musicctl eq [preset|cycle]      Set EQ (flat/bass/warm/vocal/bright/rock)
+  musicctl norm [on|off|toggle]   Toggle EBU R128 loudness normalization
   musicctl speed <0.25..4|reset>  Set playback speed
   musicctl vol <N|+N|-N>          Set or adjust volume (0-130)
   musicctl seek <+N|-N|N>         Relative seek in seconds
@@ -2019,6 +2201,14 @@ main() {
     mute)
       require_deps
       cmd_mute
+      ;;
+    eq)
+      require_deps
+      cmd_eq "$@"
+      ;;
+    norm)
+      require_deps
+      cmd_norm "$@"
       ;;
     speed)
       require_deps

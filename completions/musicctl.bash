@@ -7,7 +7,7 @@ _musicctl_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]:-}"
 
-  local commands="tui play add search radio toggle pause next prev jump remove rm clear shuffle loop repeat mute speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
+  local commands="tui play add search radio toggle pause next prev jump remove rm clear shuffle loop repeat mute eq norm speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
 
   if ((COMP_CWORD == 1)); then
     COMPREPLY=( $(compgen -W "$commands --help --version" -- "$cur") )
@@ -52,6 +52,12 @@ _musicctl_complete() {
       ;;
     speed)
       COMPREPLY=( $(compgen -W "0.75 1.0 1.25 1.5 2.0 reset" -- "$cur") )
+      ;;
+    eq)
+      COMPREPLY=( $(compgen -W "flat bass warm vocal bright rock cycle status" -- "$cur") )
+      ;;
+    norm)
+      COMPREPLY=( $(compgen -W "on off toggle status" -- "$cur") )
       ;;
     play|add)
       COMPREPLY=( $(compgen -f -- "$cur") )
