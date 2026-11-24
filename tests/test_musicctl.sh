@@ -202,11 +202,28 @@ assert_ok "daemon socket cleaned up" test ! -S "$MUSICCTL_SOCKET"
 
 # 10. Version, doctor, config precedence, synced lyrics JSON, and auto-cache resolution
 VER_OUT="$("$BIN" --version)"
-assert_contains "version prints 1.0.0" "$VER_OUT" "musicctl 1.0.0"
+assert_contains "version prints 1.1.0" "$VER_OUT" "musicctl 1.1.0"
 
 DOC_OUT="$("$BIN" doctor)"
 assert_contains "doctor checks mpv" "$DOC_OUT" "mpv"
 assert_contains "doctor checks chafa" "$DOC_OUT" "chafa"
+
+# EQ & Loudness normalization
+EQ_BASS="$("$BIN" eq bass)"
+assert_contains "eq set bass" "$EQ_BASS" "EQ: bass"
+EQ_CYCLE="$("$BIN" eq cycle)"
+assert_contains "eq cycle bass->warm" "$EQ_CYCLE" "EQ: warm"
+EQ_FLAT="$("$BIN" eq flat)"
+assert_contains "eq set flat" "$EQ_FLAT" "EQ: flat"
+assert_ok "eq invalid preset rejected" bash -c '! "$1" eq invalid_preset >/dev/null 2>&1' _ "$BIN"
+
+NORM_ON="$("$BIN" norm on)"
+assert_contains "norm on" "$NORM_ON" "Loudness norm: on"
+NORM_OFF="$("$BIN" norm toggle)"
+assert_contains "norm toggle off" "$NORM_OFF" "Loudness norm: off"
+
+DSP_JSON="$("$BIN" status --json)"
+assert_ok "status json includes eq, norm, codec, samplerate" jq -e 'has("eq") and has("norm") and has("codec") and has("samplerate") and .eq == "flat" and .norm == false' <<<"$DSP_JSON" >/dev/null
 
 cat >"$MUSICCTL_CONFIG" <<'CFG'
 MUSICCTL_CACHE=1
@@ -270,6 +287,9 @@ if [[ "$OFFLINE" != "1" ]]; then
 
   LYRICS_LIVE="$("$BIN" lyrics "Pamungkas To the Bone")"
   assert_contains "live LRCLIB lyrics returns To the Bone" "$LYRICS_LIVE" "Pamungkas"
+
+  MPV_OPUS="$(mpv --no-video --ao=null --end=0.1 --ytdl-format='251/bestaudio[acodec=opus]/bestaudio/best' --ytdl-raw-options='ignore-config=,no-playlist=,no-update=' 'https://www.youtube.com/watch?v=IR7tYHdYN2Q' 2>&1 || true)"
+  assert_contains "live mpv resolves Opus 48kHz audio" "$MPV_OPUS" "opus 2ch 48000 Hz"
 fi
 
 printf '\n=== SUMMARY: %d passed, %d failed ===\n' "$PASS" "$FAIL"
