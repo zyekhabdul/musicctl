@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=musicctl
+Comment=Lightweight YouTube Music TUI Player
+Exec=musicctl
+Icon=musicctl
+Terminal=true
+Type=Application
+Categories=Audio;AudioVideo;Music;Player;ConsoleOnly;

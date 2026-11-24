@@ -1,0 +1,89 @@
+#compdef musicctl
+
+_musicctl() {
+  local -a commands
+  commands=(
+    'tui:Launch interactive fzf Sovereign Cockpit'
+    'play:Resolve track or local file and play immediately'
+    'add:Resolve track or local file and append to queue'
+    'search:Search YouTube Music via InnerTube'
+    'radio:Queue YTM Up Next Radio mix'
+    'toggle:Toggle play/pause'
+    'pause:Toggle play/pause'
+    'next:Next track in queue'
+    'prev:Previous track in queue'
+    'jump:Jump to 1-based queue index'
+    'remove:Remove 1-based queue item'
+    'clear:Clear upcoming queue items'
+    'shuffle:Shuffle active mpv queue'
+    'loop:Cycle or set repeat mode'
+    'mute:Toggle mute'
+    'speed:Set playback speed'
+    'vol:Set or adjust volume'
+    'seek:Relative seek in seconds'
+    'status:Show playback status or Waybar JSON'
+    'queue:List active mpv queue'
+    'lyrics:Fetch lyrics via LRCLIB'
+    'download:Download Opus audio offline'
+    'local:List downloaded local audio files'
+    'pl:Manage named local playlists'
+    'sleep:Set or cancel auto-stop sleep timer'
+    'resume:Restore saved queue and playback position'
+    'save:Snapshot current queue and position'
+    'cache:Inspect or clear audio/art cache'
+    'history:Show playback history'
+    'fav:Manage local favorites'
+    'doctor:Check dependencies, MPRIS, daemon, and cache'
+    'stop:Save session and stop daemon'
+    'version:Print version'
+    'help:Show help message'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case "$words[2]" in
+    fav)
+      if (( CURRENT == 3 )); then
+        _values 'subcommand' list ls add rm del play
+      fi
+      ;;
+    pl|playlist)
+      if (( CURRENT == 3 )); then
+        _values 'subcommand' ls list create add show play rm delete
+      elif (( CURRENT == 4 )); then
+        local pdir="${MUSICCTL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/musicctl}/playlists"
+        if [[ -d "$pdir" ]]; then
+          local -a pls
+          pls=(${(f)"$(find "$pdir" -maxdepth 1 -type f -name '*.tsv' -printf '%f\n' 2>/dev/null | sed 's/\.tsv$//')"})
+          _describe 'playlist' pls
+        fi
+      fi
+      ;;
+    loop|repeat)
+      _values 'mode' off one all cycle
+      ;;
+    sleep)
+      _values 'sleep' off status 15 30 45 60
+      ;;
+    cache)
+      _values 'action' status clear
+      ;;
+    lyrics)
+      _values 'option' --live
+      ;;
+    status)
+      _values 'option' --json
+      ;;
+    clear)
+      _values 'option' --all
+      ;;
+    play|add)
+      _files
+      ;;
+  esac
+}
+
+_musicctl "$@"

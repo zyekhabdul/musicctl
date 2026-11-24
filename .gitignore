@@ -1,0 +1,15 @@
+*.tmp
+*.log
+*.pid
+*.DS_Store
+*~
+
+# Packaging and build artifacts
+target/
+dist/
+build/
+*.pkg.tar*
+packaging/arch/pkg/
+packaging/arch/src/
+__pycache__/
+*.py[cod]

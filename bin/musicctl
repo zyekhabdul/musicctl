@@ -1,0 +1,2103 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# musicctl - Lightweight Standalone YouTube Music CLI & TUI Player
+# Zero-Electron, ad-free audio streaming via InnerTube + yt-dlp + mpv IPC + fzf
+# ==============================================================================
+
+set -uo pipefail
+
+SELF_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
+MUSICCTL_VERSION="1.0.0"
+MUSICCTL_CONFIG="${MUSICCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/config}"
+
+load_user_config() {
+  [[ -f "$MUSICCTL_CONFIG" ]] || return 0
+  local line key val
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == export\ * ]] && line="${line#export }"
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"
+    val="${val%"${val##*[![:space:]]}"}"
+    if [[ "$val" =~ ^\"(.*)\"$ || "$val" =~ ^\'(.*)\'$ ]]; then
+      val="${BASH_REMATCH[1]}"
+    fi
+    case "$key" in
+      MUSICCTL_SOCKET|MUSICCTL_DATA_DIR|MUSICCTL_CACHE_DIR|MUSICCTL_CACHE|\
+      MUSICCTL_DOWNLOAD_DIR|MUSICCTL_NOTIFY|MUSICCTL_ART|MUSICCTL_ART_FORMAT|\
+      MUSICCTL_MPV_EXTRA_ARGS)
+        if [[ -z "${!key+x}" ]]; then
+          printf -v "$key" '%s' "$val"
+        fi
+        ;;
+    esac
+  done <"$MUSICCTL_CONFIG"
+}
+
+load_user_config
+
+MUSICCTL_SOCKET="${MUSICCTL_SOCKET:-${XDG_RUNTIME_DIR:-/tmp}/musicctl.sock}"
+MUSICCTL_DATA_DIR="${MUSICCTL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/musicctl}"
+MUSICCTL_CACHE_DIR="${MUSICCTL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/musicctl}"
+CACHE_AUDIO_DIR="$MUSICCTL_CACHE_DIR/audio"
+CACHE_ART_DIR="$MUSICCTL_CACHE_DIR/art"
+FAV_FILE="$MUSICCTL_DATA_DIR/favorites.tsv"
+HIST_FILE="$MUSICCTL_DATA_DIR/history.tsv"
+PLAYLIST_DIR="$MUSICCTL_DATA_DIR/playlists"
+SLEEP_STATE="$MUSICCTL_DATA_DIR/sleep.state"
+SESSION_FILE="$MUSICCTL_DATA_DIR/session.json"
+MPV_LOG="$MUSICCTL_DATA_DIR/mpv.log"
+MUSICCTL_MPV_EXTRA_ARGS="${MUSICCTL_MPV_EXTRA_ARGS:-}"
+MUSICCTL_DOWNLOAD_DIR="${MUSICCTL_DOWNLOAD_DIR:-$HOME/Music/musicctl}"
+MUSICCTL_CACHE="${MUSICCTL_CACHE:-0}"
+MUSICCTL_NOTIFY="${MUSICCTL_NOTIFY:-1}"
+MUSICCTL_ART="${MUSICCTL_ART:-1}"
+MUSICCTL_ART_FORMAT="${MUSICCTL_ART_FORMAT:-symbols}"
+
+# ANSI Styling Tokens (Tokyo Night Theme, matching gamectl)
+UI_RST=$'\033[0m'
+UI_BOLD=$'\033[1m'
+UI_DIM=$'\033[38;5;244m'
+UI_CYAN=$'\033[1;38;5;117m'
+UI_ICE=$'\033[1;38;5;153m'
+UI_PURPLE=$'\033[1;38;5;141m'
+UI_GREEN=$'\033[1;38;5;120m'
+UI_AMBER=$'\033[1;38;5;221m'
+UI_RED=$'\033[1;38;5;203m'
+UI_BOX=$'\033[38;5;60m'
+
+UI_PILL_ENTER=$'\033[1;38;5;232;48;5;117m ENTER \033[0m'
+UI_PILL_CTRLA=$'\033[1;38;5;232;48;5;120m CTRL-A \033[0m'
+UI_PILL_CTRLS=$'\033[1;38;5;232;48;5;153m CTRL-S \033[0m'
+UI_PILL_CTRLF=$'\033[1;38;5;232;48;5;221m CTRL-F \033[0m'
+UI_PILL_CTRLL=$'\033[1;38;5;232;48;5;141m CTRL-L \033[0m'
+UI_PILL_CTRLH=$'\033[1;38;5;232;48;5;141m CTRL-H \033[0m'
+UI_PILL_CTRLQ=$'\033[1;38;5;232;48;5;117m CTRL-Q \033[0m'
+UI_PILL_CTRLP=$'\033[1;38;5;232;48;5;120m CTRL-P \033[0m'
+UI_PILL_CTRLN=$'\033[1;38;5;232;48;5;153m CTRL-N \033[0m'
+UI_PILL_CTRLX=$'\033[1;38;5;232;48;5;203m CTRL-X \033[0m'
+
+init_storage() {
+  mkdir -p "$MUSICCTL_DATA_DIR" "$PLAYLIST_DIR" "$CACHE_AUDIO_DIR" "$CACHE_ART_DIR"
+  [[ -f "$FAV_FILE" ]] || : >"$FAV_FILE"
+  [[ -f "$HIST_FILE" ]] || : >"$HIST_FILE"
+}
+
+notify_track() {
+  local title="$1"
+  local body="${2:-}"
+  [[ "$MUSICCTL_NOTIFY" == "1" ]] || return 0
+  command -v notify-send >/dev/null 2>&1 || return 0
+  [[ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]] || return 0
+  notify-send -a musicctl -t 3000 "$title" "$body" >/dev/null 2>&1 || true
+}
+
+die() {
+  printf '%s[ERR]%s %s\n' "$UI_RED" "$UI_RST" "$*" >&2
+  exit 1
+}
+
+require_deps() {
+  local missing=()
+  local dep
+  for dep in mpv yt-dlp jq curl python3; do
+    command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
+  done
+  if ((${#missing[@]} > 0)); then
+    die "Missing required dependencies: ${missing[*]}"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# mpv JSON IPC Helpers
+# ------------------------------------------------------------------------------
+
+mpv_ipc() {
+  local payload="$1"
+  [[ -S "$MUSICCTL_SOCKET" ]] || return 1
+  python3 - "$MUSICCTL_SOCKET" "$payload" <<'PY'
+import json
+import socket
+import sys
+
+sock_path = sys.argv[1]
+raw_cmd = sys.argv[2]
+
+try:
+    cmd_obj = json.loads(raw_cmd)
+    if isinstance(cmd_obj, list):
+        req = {"command": cmd_obj, "request_id": 1}
+    elif isinstance(cmd_obj, dict):
+        req = dict(cmd_obj)
+        req.setdefault("request_id", 1)
+    else:
+        sys.exit(1)
+    req_id = req["request_id"]
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    s.connect(sock_path)
+    s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+
+    buf = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            sys.exit(1)
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            try:
+                obj = json.loads(text)
+            except Exception:
+                continue
+            if "error" in obj and obj.get("request_id") == req_id:
+                print(text)
+                s.close()
+                sys.exit(0 if obj.get("error") == "success" else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+mpv_cmd() {
+  local payload="$1"
+  mpv_ipc "$payload"
+}
+
+mpv_get() {
+  local prop="$1"
+  local payload resp
+  payload="$(jq -cn --arg p "$prop" '["get_property", $p]')"
+  resp="$(mpv_ipc "$payload")" || return 1
+  jq -r 'if .data == null then "" else (.data | tostring) end' <<<"$resp"
+}
+
+mpv_get_json() {
+  local prop="$1"
+  local payload resp
+  payload="$(jq -cn --arg p "$prop" '["get_property", $p]')"
+  resp="$(mpv_ipc "$payload")" || return 1
+  jq -c '.data' <<<"$resp"
+}
+
+# ------------------------------------------------------------------------------
+# Daemon Lifecycle
+# ------------------------------------------------------------------------------
+
+daemon_alive() {
+  [[ -S "$MUSICCTL_SOCKET" ]] && mpv_get "idle-active" >/dev/null 2>&1
+}
+
+find_mpris_script() {
+  local p
+  for p in \
+    /usr/lib/mpv-mpris/mpris.so \
+    /usr/lib64/mpv-mpris/mpris.so \
+    /usr/local/lib/mpv-mpris/mpris.so \
+    "${XDG_CONFIG_HOME:-$HOME/.config}/mpv/scripts/mpris.so"; do
+    if [[ -f "$p" ]]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_daemon() {
+  init_storage
+  if daemon_alive; then
+    return 0
+  fi
+
+  rm -f "$MUSICCTL_SOCKET"
+
+  local -a args=(
+    --no-video
+    --idle=yes
+    --force-window=no
+    --keep-open=no
+    --audio-display=no
+    --input-ipc-server="$MUSICCTL_SOCKET"
+    --ytdl-format=bestaudio/best
+    --ytdl-raw-options=no-playlist=
+  )
+
+  local mpris_path=""
+  mpris_path="$(find_mpris_script || true)"
+  if [[ -n "$mpris_path" ]]; then
+    args+=(--script="$mpris_path")
+  fi
+
+  if [[ -n "$MUSICCTL_MPV_EXTRA_ARGS" ]]; then
+    local -a extra_args=()
+    read -r -a extra_args <<<"$MUSICCTL_MPV_EXTRA_ARGS"
+    args+=("${extra_args[@]}")
+  fi
+
+  setsid -f mpv "${args[@]}" >/dev/null 2>"$MPV_LOG" </dev/null
+
+  local i=0
+  while ((i < 60)); do
+    if daemon_alive; then
+      return 0
+    fi
+    sleep 0.1
+    ((i++))
+  done
+
+  die "Failed to start mpv daemon (see $MPV_LOG)"
+}
+
+stop_daemon() {
+  if daemon_alive; then
+    mpv_cmd '["quit"]' >/dev/null 2>&1 || true
+    local i=0
+    while ((i < 20)) && [[ -S "$MUSICCTL_SOCKET" ]]; do
+      sleep 0.05
+      ((i++))
+    done
+  fi
+  rm -f "$MUSICCTL_SOCKET"
+}
+
+# ------------------------------------------------------------------------------
+# YTM InnerTube Search & Track Normalization
+# ------------------------------------------------------------------------------
+
+parse_ytm_search_json() {
+  jq -r '
+    .. | objects | select(.musicResponsiveListItemRenderer?) | .musicResponsiveListItemRenderer
+    | {
+        id: (.playlistItemData.videoId // .overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.videoId),
+        title: (.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text.runs[0].text),
+        meta: ([.flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text.runs[]?.text] | join(""))
+      }
+    | select(.id != null and .title != null)
+    | "\(.id)\t\(.title | gsub("[\t\r\n]+"; " "))\t\((.meta // "") | gsub("[\t\r\n]+"; " "))"
+  ' 2>/dev/null
+}
+
+ytm_search_raw() {
+  local query="$1"
+  local body
+  body="$(jq -cn --arg q "$query" '{
+    context: {
+      client: {
+        clientName: "WEB_REMIX",
+        clientVersion: "1.20260911.08.00",
+        hl: "en",
+        gl: "US"
+      }
+    },
+    query: $q,
+    params: "EgWKAQIIAWoMEAMQBBAJEAoQBRAV"
+  }')"
+
+  curl -sS -m 8 -X POST 'https://music.youtube.com/youtubei/v1/search?prettyPrint=false' \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://music.youtube.com' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+    -d "$body" 2>/dev/null
+}
+
+ytm_search() {
+  local query="$1"
+  [[ -n "${query// }" ]] || return 0
+
+  local parsed=""
+  local raw
+  raw="$(ytm_search_raw "$query" || true)"
+  if [[ -n "$raw" ]]; then
+    parsed="$(printf '%s' "$raw" | parse_ytm_search_json | awk -F'\t' 'NF>=2 && !seen[$1]++' | head -n 25)"
+  fi
+
+  if [[ -z "$parsed" ]]; then
+    parsed="$(yt-dlp --flat-playlist --no-update --print '%(id)s	%(title)s	%(channel)s • %(duration_string)s' "ytsearch10:$query" 2>/dev/null \
+      | awk -F'\t' 'NF>=2 && !seen[$1]++' | head -n 25 || true)"
+  fi
+
+  [[ -n "$parsed" ]] && printf '%s\n' "$parsed"
+}
+
+extract_video_id() {
+  local input="$1"
+  if [[ "$input" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+  if [[ "$input" =~ [?\&]v=([A-Za-z0-9_-]{11}) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$input" =~ youtu\.be/([A-Za-z0-9_-]{11}) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  printf '%s' "$input"
+}
+
+id_to_url() {
+  local id_or_url="$1"
+  if [[ "$id_or_url" =~ ^(https?://|file://|/) ]]; then
+    printf '%s' "$id_or_url"
+  else
+    printf 'https://www.youtube.com/watch?v=%s' "$id_or_url"
+  fi
+}
+
+record_history() {
+  local id="$1"
+  local title="${2:-$id}"
+  local meta="${3:-}"
+  init_storage
+  local clean_title clean_meta tmp
+  clean_title="$(printf '%s' "$title" | tr '\t\r\n' '   ')"
+  clean_meta="$(printf '%s' "$meta" | tr '\t\r\n' '   ')"
+  tmp="$(mktemp "$MUSICCTL_DATA_DIR/hist.XXXXXX")"
+  {
+    printf '%s\t%s\t%s\n' "$id" "$clean_title" "$clean_meta"
+    awk -F'\t' -v id="$id" '$1 != id && NF >= 2' "$HIST_FILE"
+  } | head -n 200 >"$tmp"
+  mv -f "$tmp" "$HIST_FILE"
+}
+
+resolve_input() {
+  local input="$1"
+  if [[ -f "$input" ]]; then
+    local abs base
+    abs="$(readlink -f "$input")"
+    base="$(basename "$abs")"
+    printf '%s\t%s\t%s\n' "$abs" "$base" "Local File"
+    return 0
+  fi
+  if [[ "$input" =~ ^https?:// ]]; then
+    local vid
+    vid="$(extract_video_id "$input")"
+    printf '%s\t%s\t%s\n' "$vid" "$input" "Direct URL"
+    return 0
+  fi
+  if [[ "$input" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
+    printf '%s\t%s\t%s\n' "$input" "$input" "Video ID"
+    return 0
+  fi
+
+  local top
+  top="$(ytm_search "$input" | head -n 1)"
+  [[ -n "$top" ]] || return 1
+  printf '%s\n' "$top"
+}
+
+find_cached_audio() {
+  local id="$1"
+  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
+  local ext f
+  for ext in opus m4a webm mp3; do
+    f="$CACHE_AUDIO_DIR/${id}.${ext}"
+    if [[ -s "$f" ]]; then
+      printf '%s' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_play_target() {
+  local id="$1"
+  local cached
+  if cached="$(find_cached_audio "$id")"; then
+    printf '%s' "$cached"
+  else
+    id_to_url "$id"
+  fi
+}
+
+cache_audio_bg() {
+  local id="$1"
+  [[ "$MUSICCTL_CACHE" == "1" ]] || return 0
+  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 0
+  ! find_cached_audio "$id" >/dev/null || return 0
+  init_storage
+  local lock_dir="$CACHE_AUDIO_DIR/.lock_${id}"
+  mkdir "$lock_dir" 2>/dev/null || return 0
+  setsid bash -c '
+    trap "rmdir \"$3\" 2>/dev/null || true" EXIT
+    yt-dlp --no-playlist --no-update -q -x --audio-format opus --embed-metadata \
+      -o "$2/$1.%(ext)s" "https://www.youtube.com/watch?v=$1" >/dev/null 2>&1
+  ' _ "$id" "$CACHE_AUDIO_DIR" "$lock_dir" </dev/null >/dev/null 2>&1 &
+  disown "$!" 2>/dev/null || true
+}
+
+play_track() {
+  local id="$1"
+  local title="${2:-$id}"
+  local meta="${3:-}"
+  local target payload
+  target="$(resolve_play_target "$id")"
+
+  ensure_daemon
+  payload="$(jq -cn --arg u "$target" '["loadfile", $u, "replace"]')"
+  mpv_cmd "$payload" >/dev/null || die "Failed to load track: $target"
+  mpv_cmd '["set_property", "pause", false]' >/dev/null 2>&1 || true
+  record_history "$id" "$title" "$meta"
+  notify_track "$title" "$meta"
+  cache_audio_bg "$id"
+}
+
+enqueue_track() {
+  local id="$1"
+  local title="${2:-$id}"
+  local meta="${3:-}"
+  local target payload
+  target="$(resolve_play_target "$id")"
+
+  ensure_daemon
+  payload="$(jq -cn --arg u "$target" '["loadfile", $u, "append-play"]')"
+  mpv_cmd "$payload" >/dev/null || die "Failed to enqueue track: $target"
+  record_history "$id" "$title" "$meta"
+  cache_audio_bg "$id"
+}
+
+# ------------------------------------------------------------------------------
+# YTM Radio / Up Next Mix
+# ------------------------------------------------------------------------------
+
+parse_ytm_radio_json() {
+  jq -r '
+    .. | objects | select(.playlistPanelVideoRenderer?) | .playlistPanelVideoRenderer
+    | {
+        id: .videoId,
+        title: (.title.runs[0].text),
+        meta: (([.longBylineText.runs[]?.text] | join("")) + (if .lengthText.runs[0].text then " • " + .lengthText.runs[0].text else "" end))
+      }
+    | select(.id != null and .title != null)
+    | "\(.id)\t\(.title | gsub("[\t\r\n]+"; " "))\t\((.meta // "") | gsub("[\t\r\n]+"; " "))"
+  ' 2>/dev/null
+}
+
+ytm_radio_fetch() {
+  local seed_id="$1"
+  [[ "$seed_id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
+  local body raw
+  body="$(jq -cn --arg vid "$seed_id" --arg pid "RDAMVM$seed_id" '{
+    context: {
+      client: {
+        clientName: "WEB_REMIX",
+        clientVersion: "1.20260911.08.00",
+        hl: "en",
+        gl: "US"
+      }
+    },
+    videoId: $vid,
+    playlistId: $pid
+  }')"
+
+  raw="$(curl -sS -m 8 -X POST 'https://music.youtube.com/youtubei/v1/next?prettyPrint=false' \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://music.youtube.com' \
+    -H 'User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' \
+    -d "$body" 2>/dev/null || true)"
+  [[ -n "$raw" ]] || return 1
+  printf '%s' "$raw" | parse_ytm_radio_json | awk -F'\t' 'NF>=2 && !seen[$1]++' | head -n 20
+}
+
+cmd_radio() {
+  local seed_id="" seed_title="" seed_meta="" keep_current=0
+  if (($# == 0)) || [[ "${1:-}" == "current" ]]; then
+    daemon_alive || die "No active player; pass <query|id|url>"
+    local idle path
+    idle="$(mpv_get "idle-active" || echo "true")"
+    [[ "$idle" == "false" ]] || die "Nothing currently playing"
+    path="$(mpv_get "path" || true)"
+    seed_id="$(extract_video_id "$path")"
+    seed_title="$(mpv_get "media-title" || true)"
+    [[ -n "$seed_title" ]] || seed_title="$seed_id"
+    keep_current=1
+  else
+    local resolved
+    resolved="$(resolve_input "$*")" || die "No results found for: $*"
+    IFS=$'\t' read -r seed_id seed_title seed_meta <<<"$resolved"
+  fi
+
+  [[ "$seed_id" =~ ^[A-Za-z0-9_-]{11}$ ]] || die "Radio requires a YouTube track ID (got: $seed_id)"
+
+  local tracks
+  tracks="$(ytm_radio_fetch "$seed_id" || true)"
+  [[ -n "$tracks" ]] || die "No radio tracks returned for $seed_id"
+
+  if ((keep_current == 0)); then
+    play_track "$seed_id" "$seed_title" "$seed_meta"
+  fi
+
+  local count=0 rid rtitle rmeta
+  while IFS=$'\t' read -r rid rtitle rmeta; do
+    [[ -n "$rid" && "$rid" != "$seed_id" ]] || continue
+    enqueue_track "$rid" "$rtitle" "$rmeta"
+    ((count++))
+  done <<<"$tracks"
+
+  printf '%s[RADIO]%s Queued %d related tracks from %s%s%s\n' \
+    "$UI_PURPLE" "$UI_RST" "$count" "$UI_BOLD" "$seed_title" "$UI_RST"
+}
+
+# ------------------------------------------------------------------------------
+# Favorites CRUD
+# ------------------------------------------------------------------------------
+
+fav_add() {
+  init_storage
+  local id="${1:-}"
+  local title="${2:-}"
+  local meta="${3:-}"
+
+  if [[ -z "$id" || "$id" == "current" ]]; then
+    daemon_alive || die "No active player; pass <id> <title> [meta] or start playback first"
+    local idle path media_title
+    idle="$(mpv_get "idle-active" || echo "true")"
+    [[ "$idle" == "false" ]] || die "Nothing currently playing"
+    path="$(mpv_get "path" || true)"
+    media_title="$(mpv_get "media-title" || true)"
+    id="$(extract_video_id "$path")"
+    title="${media_title:-$id}"
+    meta="Now Playing"
+  fi
+
+  [[ -n "$id" ]] || die "Missing track ID"
+  [[ -n "$title" ]] || title="$id"
+
+  local clean_title clean_meta tmp
+  clean_title="$(printf '%s' "$title" | tr '\t\r\n' '   ')"
+  clean_meta="$(printf '%s' "$meta" | tr '\t\r\n' '   ')"
+
+  tmp="$(mktemp "$MUSICCTL_DATA_DIR/fav.XXXXXX")"
+  {
+    printf '%s\t%s\t%s\n' "$id" "$clean_title" "$clean_meta"
+    awk -F'\t' -v id="$id" '$1 != id && NF >= 2' "$FAV_FILE"
+  } >"$tmp"
+  mv -f "$tmp" "$FAV_FILE"
+  printf '%s[OK]%s Added favorite: %s (%s)\n' "$UI_GREEN" "$UI_RST" "$clean_title" "$id"
+}
+
+fav_list() {
+  init_storage
+  if [[ ! -s "$FAV_FILE" ]]; then
+    printf '%s[IDLE]%s No favorites saved.\n' "$UI_DIM" "$UI_RST"
+    return 0
+  fi
+  local idx=1 id title meta
+  while IFS=$'\t' read -r id title meta; do
+    [[ -n "$id" ]] || continue
+    printf '%s%2d.%s %s%-36s%s %s%s%s %s(%s)%s\n' \
+      "$UI_CYAN" "$idx" "$UI_RST" \
+      "$UI_BOLD" "${title:0:36}" "$UI_RST" \
+      "$UI_DIM" "$meta" "$UI_RST" \
+      "$UI_PURPLE" "$id" "$UI_RST"
+    ((idx++))
+  done <"$FAV_FILE"
+}
+
+fav_rm() {
+  init_storage
+  local target="${1:-}"
+  [[ -n "$target" ]] || die "Usage: musicctl fav rm <id>"
+  if ! awk -F'\t' -v id="$target" '$1 == id {found=1} END{exit !found}' "$FAV_FILE"; then
+    die "Favorite not found: $target"
+  fi
+  local tmp
+  tmp="$(mktemp "$MUSICCTL_DATA_DIR/fav.XXXXXX")"
+  awk -F'\t' -v id="$target" '$1 != id && NF >= 2' "$FAV_FILE" >"$tmp"
+  mv -f "$tmp" "$FAV_FILE"
+  printf '%s[OK]%s Removed favorite: %s\n' "$UI_GREEN" "$UI_RST" "$target"
+}
+
+fav_play() {
+  init_storage
+  [[ -s "$FAV_FILE" ]] || die "No favorites saved"
+  ensure_daemon
+  local first=1 id title meta
+  while IFS=$'\t' read -r id title meta; do
+    [[ -n "$id" ]] || continue
+    if ((first == 1)); then
+      play_track "$id" "$title" "$meta"
+      first=0
+    else
+      enqueue_track "$id" "$title" "$meta"
+    fi
+  done <"$FAV_FILE"
+  printf '%s[PLAY]%s Loaded favorites queue\n' "$UI_GREEN" "$UI_RST"
+}
+
+cmd_fav() {
+  local sub="${1:-list}"
+  shift || true
+  case "$sub" in
+    list|ls) fav_list ;;
+    add)     fav_add "$@" ;;
+    rm|del)  fav_rm "$@" ;;
+    play)    fav_play ;;
+    *)       die "Usage: musicctl fav [list|add <id> <title> [meta]|rm <id>|play]" ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Playback Modes & Queue Management
+# ------------------------------------------------------------------------------
+
+get_loop_mode() {
+  if ! daemon_alive; then
+    printf 'off'
+    return 0
+  fi
+  local lf lp
+  lf="$(mpv_get "loop-file" || echo "false")"
+  lp="$(mpv_get "loop-playlist" || echo "false")"
+  if [[ "$lf" == "inf" || "$lf" == "true" ]]; then
+    printf 'one'
+  elif [[ "$lp" == "inf" || "$lp" == "true" ]]; then
+    printf 'all'
+  else
+    printf 'off'
+  fi
+}
+
+cmd_loop() {
+  local mode="${1:-cycle}"
+  ensure_daemon
+  if [[ "$mode" == "cycle" ]]; then
+    case "$(get_loop_mode)" in
+      off) mode="one" ;;
+      one) mode="all" ;;
+      *)   mode="off" ;;
+    esac
+  fi
+
+  case "$mode" in
+    off|no)
+      mpv_cmd '["set_property", "loop-file", "no"]' >/dev/null
+      mpv_cmd '["set_property", "loop-playlist", "no"]' >/dev/null
+      mode="off"
+      ;;
+    one|track)
+      mpv_cmd '["set_property", "loop-file", "inf"]' >/dev/null
+      mpv_cmd '["set_property", "loop-playlist", "no"]' >/dev/null
+      mode="one"
+      ;;
+    all|queue)
+      mpv_cmd '["set_property", "loop-file", "no"]' >/dev/null
+      mpv_cmd '["set_property", "loop-playlist", "inf"]' >/dev/null
+      mode="all"
+      ;;
+    *)
+      die "Usage: musicctl loop [off|one|all|cycle]"
+      ;;
+  esac
+  printf '%s[OK]%s Loop: %s\n' "$UI_GREEN" "$UI_RST" "$mode"
+}
+
+cmd_shuffle() {
+  daemon_alive || die "Daemon not running"
+  mpv_cmd '["playlist-shuffle"]' >/dev/null
+  printf '%s[OK]%s Queue shuffled\n' "$UI_GREEN" "$UI_RST"
+}
+
+cmd_mute() {
+  ensure_daemon
+  mpv_cmd '["cycle", "mute"]' >/dev/null
+  local m
+  m="$(mpv_get "mute" || echo "false")"
+  if [[ "$m" == "true" ]]; then
+    printf '%s[OK]%s Mute: on\n' "$UI_GREEN" "$UI_RST"
+  else
+    printf '%s[OK]%s Mute: off\n' "$UI_GREEN" "$UI_RST"
+  fi
+}
+
+cmd_speed() {
+  local val="${1:-}"
+  [[ -n "$val" ]] || die "Usage: musicctl speed <0.25..4.0|reset>"
+  [[ "$val" == "reset" ]] && val="1.0"
+  python3 - "$val" <<'PY' || die "Speed must be between 0.25 and 4.0 (got: $val)"
+import sys
+try:
+    v = float(sys.argv[1])
+except Exception:
+    sys.exit(1)
+sys.exit(0 if 0.25 <= v <= 4.0 else 1)
+PY
+  ensure_daemon
+  local payload
+  payload="$(jq -cn --argjson s "$val" '["set_property", "speed", $s]')"
+  mpv_cmd "$payload" >/dev/null
+  printf '%s[OK]%s Speed: %sx\n' "$UI_GREEN" "$UI_RST" "$val"
+}
+
+cmd_jump() {
+  local idx="${1:-}"
+  [[ "$idx" =~ ^[1-9][0-9]*$ ]] || die "Usage: musicctl jump <N> (1-based index)"
+  daemon_alive || die "Daemon not running"
+  local payload
+  payload="$(jq -cn --argjson i "$((idx - 1))" '["set_property", "playlist-pos", $i]')"
+  mpv_cmd "$payload" >/dev/null || die "Invalid queue index: #$idx"
+  cmd_status
+}
+
+cmd_remove() {
+  local idx="${1:-}"
+  [[ "$idx" =~ ^[1-9][0-9]*$ ]] || die "Usage: musicctl remove <N> (1-based index)"
+  daemon_alive || die "Daemon not running"
+  local payload
+  payload="$(jq -cn --argjson i "$((idx - 1))" '["playlist-remove", $i]')"
+  mpv_cmd "$payload" >/dev/null || die "Invalid queue index: #$idx"
+  printf '%s[OK]%s Removed queue item #%s\n' "$UI_GREEN" "$UI_RST" "$idx"
+}
+
+cmd_clear() {
+  daemon_alive || die "Daemon not running"
+  if [[ "${1:-}" == "--all" ]]; then
+    mpv_cmd '["stop"]' >/dev/null
+    mpv_cmd '["playlist-clear"]' >/dev/null || true
+    printf '%s[OK]%s Cleared queue and stopped playback\n' "$UI_GREEN" "$UI_RST"
+  else
+    mpv_cmd '["playlist-clear"]' >/dev/null
+    printf '%s[OK]%s Cleared upcoming queue items\n' "$UI_GREEN" "$UI_RST"
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Named Local Playlists
+# ------------------------------------------------------------------------------
+
+pl_validate_name() {
+  local name="${1:-}"
+  [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid playlist name '$name' (allowed: letters, digits, '_', '-')"
+}
+
+pl_file() {
+  printf '%s/%s.tsv' "$PLAYLIST_DIR" "$1"
+}
+
+cmd_playlist() {
+  init_storage
+  local sub="${1:-ls}"
+  shift || true
+  case "$sub" in
+    ls|list)
+      local found=0 f name count
+      shopt -s nullglob
+      for f in "$PLAYLIST_DIR"/*.tsv; do
+        found=1
+        name="$(basename "$f" .tsv)"
+        count="$(wc -l <"$f" | tr -d ' ')"
+        printf '%s*%s %-24s %s(%s tracks)%s\n' "$UI_CYAN" "$UI_RST" "$name" "$UI_DIM" "$count" "$UI_RST"
+      done
+      shopt -u nullglob
+      ((found == 1)) || printf '%s[IDLE]%s No playlists created.\n' "$UI_DIM" "$UI_RST"
+      ;;
+    create)
+      local name="${1:-}"
+      pl_validate_name "$name"
+      local f
+      f="$(pl_file "$name")"
+      [[ ! -e "$f" ]] || die "Playlist already exists: $name"
+      : >"$f"
+      printf '%s[OK]%s Created playlist: %s\n' "$UI_GREEN" "$UI_RST" "$name"
+      ;;
+    add)
+      local name="${1:-}"
+      pl_validate_name "$name"
+      shift || true
+      local f id title meta
+      f="$(pl_file "$name")"
+      [[ -f "$f" ]] || : >"$f"
+      if (($# == 0)) || [[ "${1:-}" == "current" ]]; then
+        daemon_alive || die "No active player; pass <query|id|url>"
+        local idle path
+        idle="$(mpv_get "idle-active" || echo "true")"
+        [[ "$idle" == "false" ]] || die "Nothing currently playing"
+        path="$(mpv_get "path" || true)"
+        id="$(extract_video_id "$path")"
+        title="$(mpv_get "media-title" || true)"
+        [[ -n "$title" ]] || title="$id"
+        meta="Now Playing"
+      else
+        local resolved
+        resolved="$(resolve_input "$*")" || die "No results found for: $*"
+        IFS=$'\t' read -r id title meta <<<"$resolved"
+      fi
+      local clean_title clean_meta tmp
+      clean_title="$(printf '%s' "$title" | tr '\t\r\n' '   ')"
+      clean_meta="$(printf '%s' "$meta" | tr '\t\r\n' '   ')"
+      tmp="$(mktemp "$PLAYLIST_DIR/pl.XXXXXX")"
+      {
+        printf '%s\t%s\t%s\n' "$id" "$clean_title" "$clean_meta"
+        awk -F'\t' -v id="$id" '$1 != id && NF >= 2' "$f"
+      } >"$tmp"
+      mv -f "$tmp" "$f"
+      printf '%s[OK]%s Added to %s: %s (%s)\n' "$UI_GREEN" "$UI_RST" "$name" "$clean_title" "$id"
+      ;;
+    show)
+      local name="${1:-}"
+      pl_validate_name "$name"
+      local f
+      f="$(pl_file "$name")"
+      [[ -f "$f" ]] || die "Playlist not found: $name"
+      if [[ ! -s "$f" ]]; then
+        printf '%s[IDLE]%s Playlist %s is empty.\n' "$UI_DIM" "$UI_RST" "$name"
+        return 0
+      fi
+      local idx=1 id title meta
+      while IFS=$'\t' read -r id title meta; do
+        [[ -n "$id" ]] || continue
+        printf '%s%2d.%s %s%-36s%s %s%s%s %s(%s)%s\n' \
+          "$UI_CYAN" "$idx" "$UI_RST" "$UI_BOLD" "${title:0:36}" "$UI_RST" \
+          "$UI_DIM" "$meta" "$UI_RST" "$UI_PURPLE" "$id" "$UI_RST"
+        ((idx++))
+      done <"$f"
+      ;;
+    play)
+      local name="${1:-}"
+      pl_validate_name "$name"
+      shift || true
+      local do_shuffle=0
+      [[ "${1:-}" == "--shuffle" ]] && do_shuffle=1
+      local f
+      f="$(pl_file "$name")"
+      [[ -s "$f" ]] || die "Playlist missing or empty: $name"
+      ensure_daemon
+      local first=1 id title meta
+      while IFS=$'\t' read -r id title meta; do
+        [[ -n "$id" ]] || continue
+        if ((first == 1)); then
+          play_track "$id" "$title" "$meta"
+          first=0
+        else
+          enqueue_track "$id" "$title" "$meta"
+        fi
+      done <"$f"
+      if ((do_shuffle == 1)); then
+        mpv_cmd '["playlist-shuffle"]' >/dev/null || true
+      fi
+      printf '%s[PLAY]%s Playing playlist: %s\n' "$UI_GREEN" "$UI_RST" "$name"
+      ;;
+    rm)
+      local name="${1:-}" id="${2:-}"
+      pl_validate_name "$name"
+      [[ -n "$id" ]] || die "Usage: musicctl pl rm <name> <id>"
+      local f
+      f="$(pl_file "$name")"
+      [[ -f "$f" ]] || die "Playlist not found: $name"
+      if ! awk -F'\t' -v id="$id" '$1 == id {found=1} END{exit !found}' "$f"; then
+        die "Track $id not in playlist $name"
+      fi
+      local tmp
+      tmp="$(mktemp "$PLAYLIST_DIR/pl.XXXXXX")"
+      awk -F'\t' -v id="$id" '$1 != id && NF >= 2' "$f" >"$tmp"
+      mv -f "$tmp" "$f"
+      printf '%s[OK]%s Removed %s from %s\n' "$UI_GREEN" "$UI_RST" "$id" "$name"
+      ;;
+    delete)
+      local name="${1:-}"
+      pl_validate_name "$name"
+      local f
+      f="$(pl_file "$name")"
+      [[ -f "$f" ]] || die "Playlist not found: $name"
+      rm -f "$f"
+      printf '%s[OK]%s Deleted playlist: %s\n' "$UI_GREEN" "$UI_RST" "$name"
+      ;;
+    *)
+      die "Usage: musicctl pl [ls|create|add|show|play|rm|delete]"
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Lyrics Lookup (LRCLIB)
+# ------------------------------------------------------------------------------
+
+parse_lyrics_json() {
+  python3 -c '
+import json
+import re
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+if not isinstance(data, list) or not data:
+    sys.exit(1)
+
+chosen = None
+for item in data:
+    if isinstance(item, dict) and (item.get("plainLyrics") or item.get("syncedLyrics")):
+        chosen = item
+        break
+
+if not chosen:
+    sys.exit(1)
+
+title = chosen.get("trackName") or "Unknown"
+artist = chosen.get("artistName") or "Unknown"
+plain = (chosen.get("plainLyrics") or "").strip()
+if not plain:
+    synced = (chosen.get("syncedLyrics") or "").strip()
+    plain = re.sub(r"(?m)^\[[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?\]\s*", "", synced)
+
+if not plain:
+    sys.exit(1)
+
+print(f"=== {title} - {artist} ===\n")
+print(plain)
+'
+}
+
+parse_synced_lyrics_json() {
+  python3 -c '
+import json
+import re
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+if not isinstance(data, list) or not data:
+    sys.exit(1)
+
+chosen = None
+for item in data:
+    if isinstance(item, dict) and item.get("syncedLyrics"):
+        chosen = item
+        break
+
+if not chosen:
+    sys.exit(1)
+
+ts_re = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
+lines = []
+for raw_line in (chosen.get("syncedLyrics") or "").splitlines():
+    matches = list(ts_re.finditer(raw_line))
+    if not matches:
+        continue
+    text = ts_re.sub("", raw_line).strip() or "..."
+    for m in matches:
+        mins = int(m.group(1))
+        secs = int(m.group(2))
+        frac = m.group(3) or "0"
+        ms = float("0." + frac)
+        lines.append({"t": round(mins * 60 + secs + ms, 3), "text": text})
+
+if not lines:
+    sys.exit(1)
+
+lines.sort(key=lambda x: x["t"])
+print(json.dumps({
+    "title": chosen.get("trackName") or "Unknown",
+    "artist": chosen.get("artistName") or "Unknown",
+    "lines": lines,
+}))
+'
+}
+
+live_lyrics_watch() {
+  local synced_json="$1"
+  python3 - "$MUSICCTL_SOCKET" "$synced_json" <<'PY'
+import json
+import select
+import socket
+import sys
+import termios
+import time
+import tty
+
+sock_path = sys.argv[1]
+payload = json.loads(sys.argv[2])
+lines = payload.get("lines", [])
+title = payload.get("title", "Unknown")
+artist = payload.get("artist", "Unknown")
+
+def mpv_prop(prop):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(0.8)
+    try:
+        s.connect(sock_path)
+        s.sendall((json.dumps({"command": ["get_property", prop], "request_id": 1}) + "\n").encode())
+        buf = b""
+        while True:
+            c = s.recv(4096)
+            if not c:
+                return None
+            buf += c
+            while b"\n" in buf:
+                ln, buf = buf.split(b"\n", 1)
+                obj = json.loads(ln.decode("utf-8", errors="replace"))
+                if obj.get("request_id") == 1:
+                    return obj.get("data")
+    except Exception:
+        return None
+    finally:
+        s.close()
+
+stdin_fd = sys.stdin.fileno()
+is_tty = sys.stdin.isatty()
+old_tty = termios.tcgetattr(stdin_fd) if is_tty else None
+try:
+    if is_tty:
+        tty.setcbreak(stdin_fd)
+    sys.stdout.write("\033[?25l")
+    while True:
+        if is_tty:
+            r, _, _ = select.select([sys.stdin], [], [], 0)
+            if r:
+                ch = sys.stdin.read(1)
+                if ch in ("q", "Q", "\x1b"):
+                    break
+        idle = mpv_prop("idle-active")
+        if idle is None or idle is True:
+            break
+        pos = mpv_prop("time-pos")
+        paused = mpv_prop("pause")
+        t = float(pos) if pos is not None else 0.0
+        active = 0
+        for idx, item in enumerate(lines):
+            if item["t"] <= t + 0.15:
+                active = idx
+            else:
+                break
+        m, s = divmod(max(0, int(t)), 60)
+        state = "[PAUSE]" if paused else "[PLAY]"
+        out = [
+            "\033[2J\033[H",
+            f"\033[1;38;5;117m=== {title} - {artist} ===\033[0m  {state} {m:02d}:{s:02d}  \033[38;5;244m(q to exit)\033[0m\n\n",
+        ]
+        start = max(0, active - 4)
+        end = min(len(lines), active + 9)
+        for i in range(start, end):
+            txt = lines[i]["text"]
+            if i == active:
+                out.append(f"\033[1;38;5;117m> {txt}\033[0m\n")
+            elif i < active:
+                out.append(f"\033[38;5;244m  {txt}\033[0m\n")
+            else:
+                out.append(f"  {txt}\n")
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+        time.sleep(0.35)
+except KeyboardInterrupt:
+    pass
+finally:
+    sys.stdout.write("\033[?25h\n")
+    sys.stdout.flush()
+    if old_tty is not None:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty)
+PY
+}
+
+cmd_lyrics() {
+  local live_mode=0
+  if [[ "${1:-}" == "--live" ]]; then
+    live_mode=1
+    shift
+  fi
+
+  local query="$*"
+  if [[ -z "${query// }" ]]; then
+    daemon_alive || die "Usage: musicctl lyrics [--live] [query] (or start playback first)"
+    local idle title artist
+    idle="$(mpv_get "idle-active" || echo "true")"
+    [[ "$idle" == "false" ]] || die "Nothing currently playing"
+    title="$(mpv_get "media-title" || true)"
+    artist="$(mpv_get "metadata/by-key/artist" || true)"
+    [[ -n "$title" ]] || die "Cannot determine current track title"
+    if [[ -n "$artist" ]] && [[ "${title,,}" != *"${artist,,}"* ]]; then
+      query="$artist $title"
+    else
+      query="$title"
+    fi
+  fi
+
+  local raw
+  raw="$(curl -sS -m 8 --get 'https://lrclib.net/api/search' --data-urlencode "q=$query" 2>/dev/null || true)"
+  [[ -n "$raw" ]] || die "LRCLIB request failed"
+
+  if ((live_mode == 1)) && daemon_alive; then
+    local synced_json
+    if synced_json="$(printf '%s' "$raw" | parse_synced_lyrics_json 2>/dev/null)"; then
+      live_lyrics_watch "$synced_json"
+      return 0
+    fi
+  fi
+
+  printf '%s' "$raw" | parse_lyrics_json || die "No lyrics found for: $query"
+}
+
+# ------------------------------------------------------------------------------
+# Offline Download & Local Library
+# ------------------------------------------------------------------------------
+
+cmd_download() {
+  mkdir -p "$MUSICCTL_DOWNLOAD_DIR"
+  local url=""
+  if (($# == 0)) || [[ "${1:-}" == "current" ]]; then
+    daemon_alive || die "No active player; pass <query|id|url>"
+    local idle path
+    idle="$(mpv_get "idle-active" || echo "true")"
+    [[ "$idle" == "false" ]] || die "Nothing currently playing"
+    path="$(mpv_get "path" || true)"
+    url="$(id_to_url "$(extract_video_id "$path")")"
+  else
+    local resolved id title meta
+    resolved="$(resolve_input "$*")" || die "No results found for: $*"
+    IFS=$'\t' read -r id title meta <<<"$resolved"
+    url="$(id_to_url "$id")"
+  fi
+
+  printf '%s[INFO]%s Downloading to %s\n' "$UI_CYAN" "$UI_RST" "$MUSICCTL_DOWNLOAD_DIR"
+  yt-dlp --no-playlist --no-update -x --audio-format opus --embed-metadata \
+    -o "$MUSICCTL_DOWNLOAD_DIR/%(artist,uploader)s - %(title)s [%(id)s].%(ext)s" \
+    "$url"
+}
+
+list_local_files() {
+  [[ -d "$MUSICCTL_DOWNLOAD_DIR" ]] || return 0
+  find "$MUSICCTL_DOWNLOAD_DIR" -maxdepth 3 -type f \
+    \( -iname '*.opus' -o -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.ogg' -o -iname '*.wav' \) \
+    | sort
+}
+
+cmd_local() {
+  local files
+  files="$(list_local_files)"
+  if [[ -z "$files" ]]; then
+    printf '%s[IDLE]%s No local audio files in %s\n' "$UI_DIM" "$UI_RST" "$MUSICCTL_DOWNLOAD_DIR"
+    return 0
+  fi
+  local idx=1 f
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    printf '%s%2d.%s %s\n' "$UI_CYAN" "$idx" "$UI_RST" "$(basename "$f")"
+    ((idx++))
+  done <<<"$files"
+}
+
+# ------------------------------------------------------------------------------
+# Sleep Timer
+# ------------------------------------------------------------------------------
+
+sleep_remaining() {
+  [[ -f "$SLEEP_STATE" ]] || return 1
+  local pid end now rem
+  IFS=: read -r pid end <"$SLEEP_STATE" 2>/dev/null || return 1
+  [[ -n "$pid" && -n "$end" ]] || { rm -f "$SLEEP_STATE"; return 1; }
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$SLEEP_STATE"
+    return 1
+  fi
+  now="$(date +%s)"
+  rem=$((end - now))
+  if ((rem <= 0)); then
+    rm -f "$SLEEP_STATE"
+    return 1
+  fi
+  printf '%dm %02ds' "$((rem / 60))" "$((rem % 60))"
+}
+
+cmd_sleep() {
+  init_storage
+  local arg="${1:-status}"
+  case "$arg" in
+    off|cancel|stop)
+      if [[ -f "$SLEEP_STATE" ]]; then
+        local pid _end
+        IFS=: read -r pid _end <"$SLEEP_STATE" 2>/dev/null || true
+        if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+          kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$SLEEP_STATE"
+      fi
+      printf '%s[OK]%s Sleep timer cancelled\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    status)
+      local rem
+      if rem="$(sleep_remaining)"; then
+        printf '%s[SLEEP]%s Stopping playback in %s\n' "$UI_AMBER" "$UI_RST" "$rem"
+      else
+        printf '%s[IDLE]%s Sleep timer inactive\n' "$UI_DIM" "$UI_RST"
+      fi
+      ;;
+    *)
+      [[ "$arg" =~ ^[1-9][0-9]*$ ]] || die "Usage: musicctl sleep <minutes|off|status>"
+      if [[ -f "$SLEEP_STATE" ]]; then
+        local old_pid _end
+        IFS=: read -r old_pid _end <"$SLEEP_STATE" 2>/dev/null || true
+        [[ -n "${old_pid:-}" ]] && kill "$old_pid" 2>/dev/null || true
+        rm -f "$SLEEP_STATE"
+      fi
+      local secs=$((arg * 60))
+      local end_epoch=$(($(date +%s) + secs))
+      setsid bash -c 'sleep "$1"; MUSICCTL_SOCKET="$2" "$3" stop >/dev/null 2>&1; rm -f "$4"' \
+        _ "$secs" "$MUSICCTL_SOCKET" "$SELF_BIN" "$SLEEP_STATE" </dev/null >/dev/null 2>&1 &
+      local timer_pid=$!
+      disown "$timer_pid" 2>/dev/null || true
+      printf '%s:%s\n' "$timer_pid" "$end_epoch" >"$SLEEP_STATE"
+      printf '%s[SLEEP]%s Playback will stop in %sm\n' "$UI_AMBER" "$UI_RST" "$arg"
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Session Persistence, Cache Management, Album Art & Diagnostics
+# ------------------------------------------------------------------------------
+
+save_session() {
+  init_storage
+  daemon_alive || return 1
+  local idle pl_json pos tpos vol muted loop_mode speed_v tmp now
+  idle="$(mpv_get "idle-active" || echo "true")"
+  [[ "$idle" == "false" ]] || return 1
+  pl_json="$(mpv_get_json "playlist" || echo "[]")"
+  local count
+  count="$(jq 'length' <<<"$pl_json" 2>/dev/null || echo 0)"
+  ((count > 0)) || return 1
+
+  pos="$(mpv_get "playlist-pos" || echo "0")"
+  tpos="$(mpv_get "time-pos" || echo "0")"
+  vol="$(mpv_get "volume" || echo "100")"
+  muted="$(mpv_get "mute" || echo "false")"
+  [[ "$muted" == "true" ]] || muted="false"
+  loop_mode="$(get_loop_mode)"
+  speed_v="$(mpv_get "speed" || echo "1")"
+  now="$(date +%s)"
+
+  tmp="$(mktemp "$MUSICCTL_DATA_DIR/session.XXXXXX")"
+  jq -cn \
+    --argjson pl "$(jq -c '[.[] | .filename | select(. != null)]' <<<"$pl_json")" \
+    --argjson pos "${pos:-0}" \
+    --argjson tpos "${tpos:-0}" \
+    --argjson vol "${vol:-100}" \
+    --argjson muted "$muted" \
+    --arg loop "$loop_mode" \
+    --argjson speed "${speed_v:-1}" \
+    --argjson saved_at "$now" \
+    '{playlist:$pl,playlist_pos:$pos,time_pos:$tpos,volume:$vol,muted:$muted,loop:$loop,speed:$speed,saved_at:$saved_at}' >"$tmp"
+  mv -f "$tmp" "$SESSION_FILE"
+}
+
+cmd_resume() {
+  init_storage
+  [[ -s "$SESSION_FILE" ]] || die "No saved session found ($SESSION_FILE)"
+  local count pos tpos vol muted loop_mode speed_v
+  count="$(jq '.playlist | length' "$SESSION_FILE" 2>/dev/null || echo 0)"
+  ((count > 0)) || die "Saved session playlist is empty"
+
+  pos="$(jq -r '.playlist_pos // 0' "$SESSION_FILE")"
+  tpos="$(jq -r '.time_pos // 0' "$SESSION_FILE")"
+  vol="$(jq -r '.volume // 100' "$SESSION_FILE")"
+  muted="$(jq -r '.muted // false' "$SESSION_FILE")"
+  loop_mode="$(jq -r '.loop // "off"' "$SESSION_FILE")"
+  speed_v="$(jq -r '.speed // 1' "$SESSION_FILE")"
+
+  ensure_daemon
+  local first=1 item payload
+  while IFS= read -r item; do
+    [[ -n "$item" ]] || continue
+    if ((first == 1)); then
+      payload="$(jq -cn --arg u "$item" '["loadfile", $u, "replace"]')"
+      first=0
+    else
+      payload="$(jq -cn --arg u "$item" '["loadfile", $u, "append"]')"
+    fi
+    mpv_cmd "$payload" >/dev/null || true
+  done < <(jq -r '.playlist[]' "$SESSION_FILE")
+
+  mpv_cmd "$(jq -cn --argjson i "$pos" '["set_property", "playlist-pos", $i]')" >/dev/null 2>&1 || true
+  mpv_cmd "$(jq -cn --argjson v "$vol" '["set_property", "volume", $v]')" >/dev/null 2>&1 || true
+  mpv_cmd "$(jq -cn --argjson m "$muted" '["set_property", "mute", $m]')" >/dev/null 2>&1 || true
+  mpv_cmd "$(jq -cn --argjson s "$speed_v" '["set_property", "speed", $s]')" >/dev/null 2>&1 || true
+  case "$loop_mode" in
+    one) cmd_loop one >/dev/null ;;
+    all) cmd_loop all >/dev/null ;;
+    *)   cmd_loop off >/dev/null ;;
+  esac
+
+  if python3 - "$tpos" <<'PY' >/dev/null 2>&1; then
+import sys
+sys.exit(0 if float(sys.argv[1]) > 1.0 else 1)
+PY
+    sleep 0.25
+    mpv_cmd "$(jq -cn --argjson t "$tpos" '["seek", $t, "absolute"]')" >/dev/null 2>&1 || true
+  fi
+
+  mpv_cmd '["set_property", "pause", false]' >/dev/null 2>&1 || true
+  printf '%s[PLAY]%s Resumed session (%s tracks)\n' "$UI_GREEN" "$UI_RST" "$count"
+}
+
+cmd_cache() {
+  init_storage
+  local sub="${1:-status}"
+  case "$sub" in
+    status)
+      local audio_n art_n audio_sz art_sz mode_lbl="off"
+      audio_n="$(find "$CACHE_AUDIO_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+      art_n="$(find "$CACHE_ART_DIR" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+      audio_sz="$(du -sh "$CACHE_AUDIO_DIR" 2>/dev/null | awk '{print $1}')"
+      art_sz="$(du -sh "$CACHE_ART_DIR" 2>/dev/null | awk '{print $1}')"
+      [[ "$MUSICCTL_CACHE" == "1" ]] && mode_lbl="on"
+      printf '%s[INFO]%s Auto-cache: %s\n' "$UI_CYAN" "$UI_RST" "$mode_lbl"
+      printf '  Audio cache : %s files (%s) in %s\n' "$audio_n" "${audio_sz:-0}" "$CACHE_AUDIO_DIR"
+      printf '  Art cache   : %s files (%s) in %s\n' "$art_n" "${art_sz:-0}" "$CACHE_ART_DIR"
+      ;;
+    clear)
+      find "$CACHE_AUDIO_DIR" -mindepth 1 -delete 2>/dev/null || true
+      find "$CACHE_ART_DIR" -mindepth 1 -delete 2>/dev/null || true
+      printf '%s[OK]%s Cache cleared\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    *)
+      die "Usage: musicctl cache [status|clear]"
+      ;;
+  esac
+}
+
+render_album_art() {
+  local id="$1"
+  [[ "$MUSICCTL_ART" == "1" ]] || return 0
+  command -v chafa >/dev/null 2>&1 || return 0
+  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 0
+  init_storage
+  local art_file="$CACHE_ART_DIR/${id}.jpg"
+  if [[ ! -s "$art_file" ]]; then
+    local tmp
+    tmp="$(mktemp "$CACHE_ART_DIR/art.XXXXXX")"
+    if curl -sSL -m 2 -o "$tmp" "https://i.ytimg.com/vi/${id}/hqdefault.jpg" 2>/dev/null && [[ -s "$tmp" ]]; then
+      mv -f "$tmp" "$art_file"
+    else
+      rm -f "$tmp"
+      return 0
+    fi
+  fi
+  chafa --format="$MUSICCTL_ART_FORMAT" --size=28x10 --animate=off "$art_file" 2>/dev/null || true
+}
+
+cmd_doctor() {
+  printf '%s=== musicctl %s diagnostics ===%s\n' "$UI_CYAN" "$MUSICCTL_VERSION" "$UI_RST"
+  local dep
+  for dep in mpv yt-dlp fzf jq curl python3; do
+    if command -v "$dep" >/dev/null 2>&1; then
+      printf '  %s[OK]%s   %-12s %s\n' "$UI_GREEN" "$UI_RST" "$dep" "$(command -v "$dep")"
+    else
+      printf '  %s[MISS]%s %-12s required\n' "$UI_RED" "$UI_RST" "$dep"
+    fi
+  done
+  for dep in chafa notify-send; do
+    if command -v "$dep" >/dev/null 2>&1; then
+      printf '  %s[OK]%s   %-12s %s (optional)\n' "$UI_GREEN" "$UI_RST" "$dep" "$(command -v "$dep")"
+    else
+      printf '  %s[OPT]%s  %-12s not installed\n' "$UI_AMBER" "$UI_RST" "$dep"
+    fi
+  done
+  local mpris_path
+  if mpris_path="$(find_mpris_script)"; then
+    printf '  %s[OK]%s   %-12s %s (optional)\n' "$UI_GREEN" "$UI_RST" "mpv-mpris" "$mpris_path"
+  else
+    printf '  %s[OPT]%s  %-12s not installed (media keys)\n' "$UI_AMBER" "$UI_RST" "mpv-mpris"
+  fi
+  if daemon_alive; then
+    printf '  %s[OK]%s   daemon       RUNNING (%s)\n' "$UI_GREEN" "$UI_RST" "$MUSICCTL_SOCKET"
+  else
+    printf '  %s[IDLE]%s daemon       not running\n' "$UI_DIM" "$UI_RST"
+  fi
+  printf '  %s[INFO]%s config       %s (%s)\n' "$UI_ICE" "$UI_RST" "$MUSICCTL_CONFIG" "$([[ -f "$MUSICCTL_CONFIG" ]] && printf 'found' || printf 'default')"
+  cmd_cache status
+}
+
+# ------------------------------------------------------------------------------
+# Status & Queue Display
+# ------------------------------------------------------------------------------
+
+format_mmss() {
+  local secs="${1:-0}"
+  python3 - "$secs" <<'PY'
+import sys
+try:
+    s = max(0, int(float(sys.argv[1])))
+except Exception:
+    s = 0
+m, rem = divmod(s, 60)
+h, m = divmod(m, 60)
+if h > 0:
+    print(f"{h}:{m:02d}:{rem:02d}")
+else:
+    print(f"{m:02d}:{rem:02d}")
+PY
+}
+
+ascii_bar() {
+  local pos="${1:-0}"
+  local dur="${2:-0}"
+  local width="${3:-18}"
+  python3 - "$pos" "$dur" "$width" <<'PY'
+import sys
+try:
+    p = max(0.0, float(sys.argv[1]))
+    d = max(0.0, float(sys.argv[2]))
+    w = int(sys.argv[3])
+except Exception:
+    p, d, w = 0.0, 0.0, 18
+if d <= 0:
+    print("[" + "-" * w + "]")
+    sys.exit(0)
+ratio = min(1.0, p / d)
+fill = int(round(ratio * w))
+if fill >= w:
+    print("[" + "=" * w + "]")
+elif fill <= 0:
+    print("[>" + "-" * (w - 1) + "]")
+else:
+    print("[" + "=" * (fill - 1) + ">" + "-" * (w - fill) + "]")
+PY
+}
+
+cmd_status() {
+  local json_mode=0
+  if [[ "${1:-}" == "--json" ]]; then
+    json_mode=1
+  fi
+
+  local loop_mode="off" muted_b="false" speed_v="1" sleep_rem=""
+  sleep_rem="$(sleep_remaining || true)"
+
+  if ! daemon_alive; then
+    if ((json_mode == 1)); then
+      jq -cn --arg loop "$loop_mode" --arg sleep "$sleep_rem" \
+        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":false,"loop":$loop,"speed":1,"sleep":$sleep,"text":"[IDLE]"}'
+    else
+      printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
+      [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
+    fi
+    return 0
+  fi
+
+  loop_mode="$(get_loop_mode)"
+  muted_b="$(mpv_get "mute" || echo "false")"
+  [[ "$muted_b" == "true" ]] || muted_b="false"
+  speed_v="$(mpv_get "speed" || echo "1")"
+  [[ -n "$speed_v" ]] || speed_v="1"
+
+  local idle paused title pos dur vol qcount qpos
+  idle="$(mpv_get "idle-active" || echo "true")"
+  if [[ "$idle" == "true" ]]; then
+    if ((json_mode == 1)); then
+      jq -cn --argjson muted "$muted_b" --arg loop "$loop_mode" --argjson speed "$speed_v" --arg sleep "$sleep_rem" \
+        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":$muted,"loop":$loop,"speed":$speed,"sleep":$sleep,"text":"[IDLE]"}'
+    else
+      printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
+      [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
+    fi
+    return 0
+  fi
+
+  paused="$(mpv_get "pause" || echo "false")"
+  title="$(mpv_get "media-title" || true)"
+  [[ -n "$title" ]] || title="$(mpv_get "filename" || echo "Unknown")"
+  pos="$(mpv_get "time-pos" || echo "0")"
+  dur="$(mpv_get "duration" || echo "0")"
+  vol="$(mpv_get "volume" || echo "100")"
+  qcount="$(mpv_get "playlist-count" || echo "1")"
+  qpos="$(mpv_get "playlist-pos" || echo "0")"
+
+  local qhuman=$(( ${qpos:-0} + 1 ))
+  local state="playing" badge="[PLAY]" badge_col="$UI_GREEN"
+  if [[ "$paused" == "true" ]]; then
+    state="paused"
+    badge="[PAUSE]"
+    badge_col="$UI_AMBER"
+  fi
+
+  local pos_s dur_s bar vol_i
+  pos_s="$(format_mmss "$pos")"
+  dur_s="$(format_mmss "$dur")"
+  bar="$(ascii_bar "$pos" "$dur" 18)"
+  vol_i="${vol%.*}"
+  [[ -n "$vol_i" ]] || vol_i=100
+
+  if ((json_mode == 1)); then
+    jq -cn \
+      --arg state "$state" \
+      --arg title "$title" \
+      --argjson pos "${pos:-0}" \
+      --argjson duration "${dur:-0}" \
+      --argjson volume "${vol_i:-100}" \
+      --argjson qpos "$qhuman" \
+      --argjson qcount "${qcount:-1}" \
+      --argjson muted "$muted_b" \
+      --arg loop "$loop_mode" \
+      --argjson speed "$speed_v" \
+      --arg sleep "$sleep_rem" \
+      --arg text "$badge $title ($pos_s/$dur_s)" \
+      '{state:$state,title:$title,pos:$pos,duration:$duration,volume:$volume,queue_pos:$qpos,queue_count:$qcount,muted:$muted,loop:$loop,speed:$speed,sleep:$sleep,text:$text}'
+  else
+    local extras=""
+    [[ "$muted_b" == "true" ]] && extras+="  |  MUTE"
+    [[ "$loop_mode" != "off" ]] && extras+="  |  Loop: $loop_mode"
+    [[ "$speed_v" != "1" && "$speed_v" != "1.0" && "$speed_v" != "1.00" ]] && extras+="  |  ${speed_v}x"
+    [[ -n "$sleep_rem" ]] && extras+="  |  Sleep: $sleep_rem"
+    printf '%s%s%s %s%s%s\n' "$badge_col" "$badge" "$UI_RST" "$UI_BOLD" "$title" "$UI_RST"
+    printf '  %s%s%s %s/%s  |  Vol: %s%%  |  Queue: %d/%d%s\n' \
+      "$UI_CYAN" "$bar" "$UI_RST" "$pos_s" "$dur_s" "$vol_i" "$qhuman" "${qcount:-1}" "$extras"
+  fi
+}
+
+cmd_queue() {
+  if ! daemon_alive; then
+    printf '%s[IDLE]%s Daemon not running\n' "$UI_DIM" "$UI_RST"
+    return 0
+  fi
+  local pl_json
+  pl_json="$(mpv_get_json "playlist" || echo "[]")"
+  if [[ "$pl_json" == "[]" || -z "$pl_json" ]]; then
+    printf '%s[IDLE]%s Queue is empty\n' "$UI_DIM" "$UI_RST"
+    return 0
+  fi
+  jq -r 'to_entries[] | "\(.key + 1)\t\((.value.current // false))\t\(.value.title // .value.filename // "Unknown")\t\(.value.filename // "")"' <<<"$pl_json" \
+    | while IFS=$'\t' read -r idx is_cur title fname; do
+        if [[ "$is_cur" == "true" ]]; then
+          printf '%s>%s %2s. %s%s%s\n' "$UI_GREEN" "$UI_RST" "$idx" "$UI_BOLD" "$title" "$UI_RST"
+        else
+          printf '  %2s. %s\n' "$idx" "$title"
+        fi
+      done
+}
+
+# ------------------------------------------------------------------------------
+# Interactive fzf Sovereign Cockpit + Internal Helpers
+# ------------------------------------------------------------------------------
+
+is_fav_id() {
+  local id="$1"
+  [[ -f "$FAV_FILE" ]] && awk -F'\t' -v id="$id" '$1 == id {found=1; exit} END{exit !found}' "$FAV_FILE"
+}
+
+cmd_internal_view() {
+  init_storage
+  local mode="${1:-home}"
+  case "$mode" in
+    home)
+      {
+        if [[ -s "$FAV_FILE" ]]; then
+          awk -F'\t' 'NF>=2 {print $1 "\t" $2 "\t" $3 "\t[FAV]"}' "$FAV_FILE"
+        fi
+        if [[ -s "$HIST_FILE" ]]; then
+          awk -F'\t' 'NF>=2 {print $1 "\t" $2 "\t" $3 "\t[HIS]"}' "$HIST_FILE"
+        fi
+      } | awk -F'\t' '!seen[$1]++'
+      ;;
+    fav)
+      if [[ -s "$FAV_FILE" ]]; then
+        awk -F'\t' 'NF>=2 {print $1 "\t" $2 "\t" $3 "\t[FAV]"}' "$FAV_FILE"
+      fi
+      ;;
+    hist)
+      if [[ -s "$HIST_FILE" ]]; then
+        awk -F'\t' 'NF>=2 {print $1 "\t" $2 "\t" $3 "\t[HIS]"}' "$HIST_FILE"
+      fi
+      ;;
+    queue)
+      if daemon_alive; then
+        local pl_json
+        pl_json="$(mpv_get_json "playlist" || echo "[]")"
+        jq -r 'to_entries[] | "\(.value.filename // "")\t\(.value.title // .value.filename // "Unknown")\t\((if .value.current then "Active" else "Queued" end))\t[Q]\t\(.key)"' <<<"$pl_json" \
+          | while IFS=$'\t' read -r fname title meta tag idx; do
+              local vid
+              vid="$(extract_video_id "$fname")"
+              printf '%s\t%s\t%s\t%s\t%s\n' "$vid" "$title" "$meta" "$tag" "$idx"
+            done
+      fi
+      ;;
+    local)
+      local f
+      while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        printf '%s\t%s\tLocal Audio\t[LOC]\n' "$f" "$(basename "$f")"
+      done <<<"$(list_local_files)"
+      ;;
+  esac
+}
+
+cmd_internal_search() {
+  local query="$*"
+  [[ -n "${query// }" ]] || { cmd_internal_view home; return 0; }
+  ytm_search "$query" | awk -F'\t' 'NF>=2 {print $1 "\t" $2 "\t" $3 "\t[YTM]"}'
+}
+
+cmd_internal_play_line() {
+  local line="${1:-}"
+  local id title meta tag qidx
+  IFS=$'\t' read -r id title meta tag qidx <<<"$line"
+  if [[ "$tag" == "[Q]" && "$qidx" =~ ^[0-9]+$ ]] && daemon_alive; then
+    local payload
+    payload="$(jq -cn --argjson i "$qidx" '["set_property", "playlist-pos", $i]')"
+    mpv_cmd "$payload" >/dev/null
+    mpv_cmd '["set_property", "pause", false]' >/dev/null 2>&1 || true
+    return 0
+  fi
+  [[ -n "$id" ]] || return 0
+  play_track "$id" "$title" "$meta"
+}
+
+cmd_internal_add_line() {
+  local line="${1:-}"
+  local id title meta _tag
+  IFS=$'\t' read -r id title meta _tag <<<"$line"
+  [[ -n "$id" ]] || return 0
+  enqueue_track "$id" "$title" "$meta"
+}
+
+cmd_internal_fav_line() {
+  local line="${1:-}"
+  local id title meta _tag
+  IFS=$'\t' read -r id title meta _tag <<<"$line"
+  [[ -n "$id" ]] || return 0
+  if is_fav_id "$id"; then
+    fav_rm "$id" >/dev/null
+  else
+    fav_add "$id" "$title" "$meta" >/dev/null
+  fi
+}
+
+cmd_internal_radio_line() {
+  local line="${1:-}"
+  local id _title _meta _tag
+  IFS=$'\t' read -r id _title _meta _tag <<<"$line"
+  if [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
+    cmd_radio "$id" >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_internal_lyrics_line() {
+  local line="${1:-}"
+  local live_flag=""
+  if [[ "$line" == "--live" ]]; then
+    live_flag="--live"
+    line="${2:-}"
+  fi
+  local id title meta _tag
+  IFS=$'\t' read -r id title meta _tag <<<"$line"
+  if [[ -n "$title" ]]; then
+    local artist=""
+    if [[ "$meta" == *"•"* ]]; then
+      artist="${meta%%•*}"
+      artist="${artist#"${artist%%[![:space:]]*}"}"
+      artist="${artist%"${artist##*[![:space:]]}"}"
+    fi
+    if [[ -n "$artist" ]] && [[ "${title,,}" != *"${artist,,}"* ]]; then
+      cmd_lyrics ${live_flag:+$live_flag} "$artist $title" && return 0
+    fi
+    cmd_lyrics ${live_flag:+$live_flag} "$title" && return 0
+  fi
+  cmd_lyrics ${live_flag:+$live_flag}
+}
+
+cmd_internal_preview() {
+  local line="${1:-}"
+  local id title meta tag _qidx
+  IFS=$'\t' read -r id title meta tag _qidx <<<"$line"
+
+  local loop_mode muted_b speed_v sleep_rem
+  loop_mode="$(get_loop_mode)"
+  sleep_rem="$(sleep_remaining || true)"
+
+  printf '%s╭─ NOW PLAYING ─────────────────────────────────╮%s\n' "$UI_BOX" "$UI_RST"
+  if daemon_alive && [[ "$(mpv_get "idle-active" || echo "true")" == "false" ]]; then
+    local paused now_title pos dur vol qcount qpos pos_s dur_s bar state_col state_lbl
+    paused="$(mpv_get "pause" || echo "false")"
+    now_title="$(mpv_get "media-title" || true)"
+    [[ -n "$now_title" ]] || now_title="$(mpv_get "filename" || echo "Unknown")"
+    pos="$(mpv_get "time-pos" || echo "0")"
+    dur="$(mpv_get "duration" || echo "0")"
+    vol="$(mpv_get "volume" || echo "100")"
+    muted_b="$(mpv_get "mute" || echo "false")"
+    speed_v="$(mpv_get "speed" || echo "1")"
+    qcount="$(mpv_get "playlist-count" || echo "1")"
+    qpos="$(mpv_get "playlist-pos" || echo "0")"
+    pos_s="$(format_mmss "$pos")"
+    dur_s="$(format_mmss "$dur")"
+    bar="$(ascii_bar "$pos" "$dur" 20)"
+    if [[ "$paused" == "true" ]]; then
+      state_col="$UI_AMBER"; state_lbl="[PAUSE]"
+    else
+      state_col="$UI_GREEN"; state_lbl="[PLAY]"
+    fi
+    printf ' %s%s%s %s%s%s\n' "$state_col" "$state_lbl" "$UI_RST" "$UI_BOLD" "${now_title:0:38}" "$UI_RST"
+    printf ' %s%s%s %s/%s\n' "$UI_CYAN" "$bar" "$UI_RST" "$pos_s" "$dur_s"
+    printf ' %sVol:%s %s%%%s  %sQueue:%s %d/%d  %sLoop:%s %s\n' \
+      "$UI_DIM" "$UI_RST" "${vol%.*}" "$([[ "$muted_b" == "true" ]] && printf ' [MUTE]')" \
+      "$UI_DIM" "$UI_RST" "$(( ${qpos:-0} + 1 ))" "${qcount:-1}" \
+      "$UI_DIM" "$UI_RST" "$loop_mode"
+    if [[ "$speed_v" != "1" && "$speed_v" != "1.0" && "$speed_v" != "1.00" ]] || [[ -n "$sleep_rem" ]]; then
+      printf ' %sSpeed:%s %sx%s\n' "$UI_DIM" "$UI_RST" "${speed_v:-1}" \
+        "$([[ -n "$sleep_rem" ]] && printf '  Sleep: %s' "$sleep_rem")"
+    fi
+  else
+    printf ' %s[IDLE]%s No active playback\n' "$UI_DIM" "$UI_RST"
+    printf ' %sType a query and press CTRL-S to search YTM%s\n' "$UI_DIM" "$UI_RST"
+  fi
+  printf '%s╰───────────────────────────────────────────────╯%s\n\n' "$UI_BOX" "$UI_RST"
+
+  printf '%s╭─ SELECTED TRACK ──────────────────────────────╮%s\n' "$UI_BOX" "$UI_RST"
+  if [[ -n "$id" ]]; then
+    local fav_mark="No"
+    is_fav_id "$id" && fav_mark="${UI_GREEN}Yes${UI_RST}"
+    printf ' %sTitle :%s %s\n' "$UI_ICE" "$UI_RST" "$title"
+    printf ' %sInfo  :%s %s\n' "$UI_ICE" "$UI_RST" "${meta:--}"
+    printf ' %sID    :%s %s %s%s%s\n' "$UI_ICE" "$UI_RST" "$id" "$UI_PURPLE" "${tag:-}" "$UI_RST"
+    printf ' %sFav   :%s %s\n' "$UI_ICE" "$UI_RST" "$fav_mark"
+    local art_out
+    art_out="$(render_album_art "$id" || true)"
+    if [[ -n "$art_out" ]]; then
+      printf '\n%s\n' "$art_out"
+    fi
+  else
+    printf ' %sNo track selected%s\n' "$UI_DIM" "$UI_RST"
+  fi
+  printf '%s╰───────────────────────────────────────────────╯%s\n\n' "$UI_BOX" "$UI_RST"
+
+  printf '%sHOTKEYS%s\n' "$UI_CYAN" "$UI_RST"
+  printf ' %s Play     %s Enqueue\n' "$UI_PILL_ENTER" "$UI_PILL_CTRLA"
+  printf ' %s Search   %s Toggle Fav\n' "$UI_PILL_CTRLS" "$UI_PILL_CTRLF"
+  printf ' %s Favs     %s History\n' "$UI_PILL_CTRLL" "$UI_PILL_CTRLH"
+  printf ' %s Queue    %s Pause/Play\n' "$UI_PILL_CTRLQ" "$UI_PILL_CTRLP"
+  printf ' %s Next     %s Stop\n' "$UI_PILL_CTRLN" "$UI_PILL_CTRLX"
+  printf ' %sCTRL-R%s Radio  %sCTRL-D%s Local  %sCTRL-B%s Prev\n' "$UI_PURPLE" "$UI_RST" "$UI_ICE" "$UI_RST" "$UI_CYAN" "$UI_RST"
+  printf ' %sCTRL-O%s Loop   %sCTRL-U%s Shuf   %sALT-L/K%s Lyrics\n' "$UI_AMBER" "$UI_RST" "$UI_GREEN" "$UI_RST" "$UI_ICE" "$UI_RST"
+  printf ' %sALT-M%s Mute    %sALT-=/-%s Vol  %sALT-</>%s Seek\n' "$UI_RED" "$UI_RST" "$UI_GREEN" "$UI_RST" "$UI_CYAN" "$UI_RST"
+}
+
+cmd_tui() {
+  command -v fzf >/dev/null 2>&1 || die "fzf is required for TUI mode"
+  init_storage
+  local initial_query="${*:-}"
+  local initial_cmd
+  if [[ -n "$initial_query" ]]; then
+    initial_cmd="$(printf '%q ' "$SELF_BIN" _search "$initial_query")"
+  else
+    initial_cmd="$(printf '%q ' "$SELF_BIN" _view home)"
+  fi
+
+  local header
+  header="${UI_CYAN}MUSICCTL SOVEREIGN COCKPIT${UI_RST}  ${UI_DIM}|${UI_RST}  ${UI_PILL_CTRLS} Search  ${UI_PILL_ENTER} Play  ${UI_PILL_CTRLA} Queue  ${UI_PILL_CTRLF} Fav  ${UI_PILL_CTRLP} Pause"
+
+  FZF_DEFAULT_COMMAND="$initial_cmd" fzf \
+    --ansi \
+    --no-sort \
+    --layout=reverse \
+    --border=rounded \
+    --prompt="ytm> " \
+    --header="$header" \
+    --delimiter=$'\t' \
+    --with-nth=2,3,4 \
+    --preview="\"$SELF_BIN\" _preview {}" \
+    --preview-window="right:42%:wrap" \
+    --color="bg+:#283457,fg+:#c0caf5,hl:#7aa2f7,hl+:#7dcfff,header:#7aa2f7,border:#414868,prompt:#9ece6a,pointer:#bb9af7" \
+    --bind="enter:execute-silent(\"$SELF_BIN\" _play_line {})+refresh-preview" \
+    --bind="ctrl-a:execute-silent(\"$SELF_BIN\" _add_line {})+refresh-preview" \
+    --bind="ctrl-s:reload(\"$SELF_BIN\" _search {q})" \
+    --bind="ctrl-r:execute-silent(\"$SELF_BIN\" _radio_line {})+refresh-preview" \
+    --bind="ctrl-f:execute-silent(\"$SELF_BIN\" _fav_line {})+refresh-preview" \
+    --bind="ctrl-l:reload(\"$SELF_BIN\" _view fav)" \
+    --bind="ctrl-h:reload(\"$SELF_BIN\" _view hist)" \
+    --bind="ctrl-q:reload(\"$SELF_BIN\" _view queue)" \
+    --bind="ctrl-d:reload(\"$SELF_BIN\" _view local)" \
+    --bind="ctrl-p:execute-silent(\"$SELF_BIN\" toggle)+refresh-preview" \
+    --bind="ctrl-n:execute-silent(\"$SELF_BIN\" next)+refresh-preview" \
+    --bind="ctrl-b:execute-silent(\"$SELF_BIN\" prev)+refresh-preview" \
+    --bind="ctrl-o:execute-silent(\"$SELF_BIN\" loop)+refresh-preview" \
+    --bind="ctrl-u:execute-silent(\"$SELF_BIN\" shuffle)+refresh-preview" \
+    --bind="ctrl-x:execute-silent(\"$SELF_BIN\" stop)+refresh-preview" \
+    --bind="alt-m:execute-silent(\"$SELF_BIN\" mute)+refresh-preview" \
+    --bind="alt-=:execute-silent(\"$SELF_BIN\" vol +5)+refresh-preview" \
+    --bind="alt--:execute-silent(\"$SELF_BIN\" vol -5)+refresh-preview" \
+    --bind="alt-right:execute-silent(\"$SELF_BIN\" seek +10)+refresh-preview" \
+    --bind="alt-left:execute-silent(\"$SELF_BIN\" seek -10)+refresh-preview" \
+    --bind="alt-l:execute(\"$SELF_BIN\" _lyrics_line {} | less -R)" \
+    --bind="alt-k:execute(\"$SELF_BIN\" _lyrics_line --live {})" \
+    || true
+}
+
+# ------------------------------------------------------------------------------
+# CLI Usage & Router
+# ------------------------------------------------------------------------------
+
+cmd_help() {
+  cat <<EOF
+${UI_CYAN}musicctl${UI_RST} v${MUSICCTL_VERSION} - Lightweight Standalone YouTube Music CLI & TUI Player
+
+${UI_BOLD}USAGE${UI_RST}
+  musicctl                        Launch interactive fzf Sovereign Cockpit
+  musicctl tui [query]            Launch TUI (optionally preloaded with YTM search)
+  musicctl play <query|id|url|f>  Resolve track or local file and play immediately
+  musicctl add <query|id|url|f>   Resolve track or local file and append to queue
+  musicctl search <query>         Search YouTube Music via InnerTube (TSV)
+  musicctl radio [current|query]  Queue YTM Up Next Radio mix
+  musicctl toggle | pause         Toggle play/pause
+  musicctl next | prev            Next / previous track in queue
+  musicctl jump <N>               Jump to queue item #N (1-based)
+  musicctl remove <N>             Remove queue item #N
+  musicctl clear [--all]          Clear upcoming queue (or --all incl. current)
+  musicctl shuffle                Shuffle active mpv queue
+  musicctl loop [off|one|all]     Cycle or set repeat mode
+  musicctl mute                   Toggle mute
+  musicctl speed <0.25..4|reset>  Set playback speed
+  musicctl vol <N|+N|-N>          Set or adjust volume (0-130)
+  musicctl seek <+N|-N|N>         Relative seek in seconds
+  musicctl status [--json]        Show playback status (or Waybar JSON)
+  musicctl queue                  List current mpv queue
+  musicctl lyrics [--live] [q]    Fetch song lyrics via LRCLIB (or live-sync)
+  musicctl download [current|q]   Download Opus audio to \$MUSICCTL_DOWNLOAD_DIR
+  musicctl local                  List downloaded local audio files
+  musicctl pl <subcmd>            Manage named playlists (ls/create/add/show/play/rm/delete)
+  musicctl sleep <min|off|status> Auto-stop sleep timer
+  musicctl resume | save          Restore or snapshot queue & playback position
+  musicctl cache [status|clear]   Inspect or clear auto-cached audio & album art
+  musicctl history                Show recently played tracks
+  musicctl fav [list|add|rm|play] Manage local favorites
+  musicctl doctor                 Check dependencies, MPRIS, daemon, and cache
+  musicctl stop                   Save session and stop background mpv daemon
+  musicctl --version | -v         Print version
+  musicctl --help | -h            Show this help message
+EOF
+}
+
+main() {
+  local cmd="${1:-tui}"
+  if (($# > 0)); then
+    shift
+  fi
+
+  case "$cmd" in
+    -h|--help|help)
+      cmd_help
+      ;;
+    -v|--version|version)
+      printf 'musicctl %s\n' "$MUSICCTL_VERSION"
+      ;;
+    _parse_ytm)
+      parse_ytm_search_json
+      ;;
+    _parse_radio)
+      parse_ytm_radio_json
+      ;;
+    _parse_lyrics)
+      parse_lyrics_json
+      ;;
+    _parse_synced_lyrics)
+      parse_synced_lyrics_json
+      ;;
+    _resolve_play_target)
+      resolve_play_target "${1:-}"
+      ;;
+    _view)
+      cmd_internal_view "$@"
+      ;;
+    _search)
+      cmd_internal_search "$@"
+      ;;
+    _preview)
+      cmd_internal_preview "$@"
+      ;;
+    _play_line)
+      require_deps
+      cmd_internal_play_line "$@"
+      ;;
+    _add_line)
+      require_deps
+      cmd_internal_add_line "$@"
+      ;;
+    _fav_line)
+      cmd_internal_fav_line "$@"
+      ;;
+    _radio_line)
+      require_deps
+      cmd_internal_radio_line "$@"
+      ;;
+    _lyrics_line)
+      require_deps
+      cmd_internal_lyrics_line "$@"
+      ;;
+    doctor)
+      cmd_doctor
+      ;;
+    save)
+      require_deps
+      save_session || die "No active playback session to save"
+      printf '%s[OK]%s Session saved to %s\n' "$UI_GREEN" "$UI_RST" "$SESSION_FILE"
+      ;;
+    resume)
+      require_deps
+      cmd_resume
+      ;;
+    cache)
+      cmd_cache "$@"
+      ;;
+    tui)
+      require_deps
+      cmd_tui "$@"
+      ;;
+    search)
+      require_deps
+      (($# > 0)) || die "Usage: musicctl search <query>"
+      ytm_search "$*"
+      ;;
+    play)
+      require_deps
+      (($# > 0)) || die "Usage: musicctl play <query|id|url|file>"
+      local resolved id title meta
+      resolved="$(resolve_input "$*")" || die "No results found for: $*"
+      IFS=$'\t' read -r id title meta <<<"$resolved"
+      play_track "$id" "$title" "$meta"
+      printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      ;;
+    add)
+      require_deps
+      (($# > 0)) || die "Usage: musicctl add <query|id|url|file>"
+      local resolved id title meta
+      resolved="$(resolve_input "$*")" || die "No results found for: $*"
+      IFS=$'\t' read -r id title meta <<<"$resolved"
+      enqueue_track "$id" "$title" "$meta"
+      printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      ;;
+    radio)
+      require_deps
+      cmd_radio "$@"
+      ;;
+    toggle|pause)
+      require_deps
+      daemon_alive || die "Daemon not running"
+      mpv_cmd '["cycle", "pause"]' >/dev/null
+      cmd_status
+      ;;
+    next)
+      require_deps
+      daemon_alive || die "Daemon not running"
+      mpv_cmd '["playlist-next", "weak"]' >/dev/null || true
+      cmd_status
+      ;;
+    prev)
+      require_deps
+      daemon_alive || die "Daemon not running"
+      mpv_cmd '["playlist-prev", "weak"]' >/dev/null || true
+      cmd_status
+      ;;
+    jump)
+      require_deps
+      cmd_jump "$@"
+      ;;
+    remove|rm)
+      require_deps
+      cmd_remove "$@"
+      ;;
+    clear)
+      require_deps
+      cmd_clear "$@"
+      ;;
+    shuffle)
+      require_deps
+      cmd_shuffle
+      ;;
+    loop|repeat)
+      require_deps
+      cmd_loop "$@"
+      ;;
+    mute)
+      require_deps
+      cmd_mute
+      ;;
+    speed)
+      require_deps
+      cmd_speed "$@"
+      ;;
+    vol|volume)
+      require_deps
+      (($# > 0)) || die "Usage: musicctl vol <N|+N|-N>"
+      ensure_daemon
+      local arg="$1" payload
+      if [[ "$arg" =~ ^[+-][0-9]+(\.[0-9]+)?$ ]]; then
+        payload="$(jq -cn --argjson v "$arg" '["add", "volume", $v]')"
+      elif [[ "$arg" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        payload="$(jq -cn --argjson v "$arg" '["set_property", "volume", $v]')"
+      else
+        die "Invalid volume value: $arg"
+      fi
+      mpv_cmd "$payload" >/dev/null
+      printf '%s[OK]%s Volume: %s%%\n' "$UI_GREEN" "$UI_RST" "$(mpv_get "volume" | cut -d. -f1)"
+      ;;
+    seek)
+      require_deps
+      (($# > 0)) || die "Usage: musicctl seek <+N|-N|N>"
+      daemon_alive || die "Daemon not running"
+      local arg="$1" payload
+      [[ "$arg" =~ ^[+-]?[0-9]+(\.[0-9]+)?$ ]] || die "Invalid seek seconds: $arg"
+      payload="$(jq -cn --argjson s "$arg" '["seek", $s, "relative"]')"
+      mpv_cmd "$payload" >/dev/null
+      cmd_status
+      ;;
+    status)
+      require_deps
+      cmd_status "${1:-}"
+      ;;
+    queue)
+      require_deps
+      cmd_queue
+      ;;
+    lyrics)
+      require_deps
+      cmd_lyrics "$@"
+      ;;
+    download|dl)
+      require_deps
+      cmd_download "$@"
+      ;;
+    local)
+      cmd_local
+      ;;
+    pl|playlist)
+      require_deps
+      cmd_playlist "$@"
+      ;;
+    sleep)
+      require_deps
+      cmd_sleep "$@"
+      ;;
+    history|hist)
+      init_storage
+      if [[ ! -s "$HIST_FILE" ]]; then
+        printf '%s[IDLE]%s No playback history.\n' "$UI_DIM" "$UI_RST"
+      else
+        nl -ba "$HIST_FILE"
+      fi
+      ;;
+    fav)
+      require_deps
+      cmd_fav "$@"
+      ;;
+    stop)
+      save_session >/dev/null 2>&1 || true
+      "$SELF_BIN" sleep off >/dev/null 2>&1 || true
+      stop_daemon
+      printf '%s[OK]%s Daemon stopped\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    *)
+      die "Unknown command: $cmd (run 'musicctl --help')"
+      ;;
+  esac
+}
+
+main "$@"
