@@ -8,8 +8,8 @@ import dataclasses
 import json
 import math
 import os
+import queue
 import re
-import socket
 import subprocess
 import sys
 import threading
@@ -19,6 +19,23 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from common import (
+    TS_RE,
+    VIDEO_ID_RE,
+    MpvClient,
+    extract_primary_artist,
+    extract_video_id,
+    format_mmss,
+    format_speed,
+    parse_fallback_lyrics_json,
+    parse_synced_lyrics_lines,
+    pick_best_lyrics_candidate,
+)
 
 # UI color pair IDs (1..24 reserved; 25+ dynamic for album art)
 PAIR_DEFAULT = 0
@@ -43,20 +60,7 @@ PAIR_SPEC_HIGH = 18
 
 ART_PAIR_START = 25
 SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
-VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
-TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
 WAVE_BARS = "▁▂▃▄▅▆▇█"
-
-
-def format_speed(val: Any) -> str:
-    """Return clean speed label (e.g. '1.5x') or empty string when ~1.0x."""
-    try:
-        spd = float(val)
-    except (TypeError, ValueError):
-        return ""
-    if abs(spd - 1.0) <= 0.001:
-        return ""
-    return f"{round(spd, 2):g}x"
 
 
 def format_audio_badge(codec: str, samplerate: Any, sample_fmt: str = "") -> str:
@@ -80,41 +84,6 @@ def format_audio_badge(codec: str, samplerate: Any, sample_fmt: str = "") -> str
         khz = sr / 1000.0
         hz_lbl = f" {int(khz)}kHz" if sr % 1000 == 0 else f" {khz:.1f}kHz"
     return f"{c.upper()}{bits_lbl}{hz_lbl}"
-
-
-def parse_fallback_lyrics_json(
-    raw_json: str, title: str, artist: str = ""
-) -> tuple[str, list[tuple[float | None, str]]] | None:
-    """Parse secondary plain-lyrics JSON (e.g. lyrics.ovh) into header and lines."""
-    if not raw_json or not raw_json.strip():
-        return None
-    try:
-        obj = json.loads(raw_json)
-    except Exception:
-        return None
-    if not isinstance(obj, dict):
-        return None
-    body = str(obj.get("lyrics") or "").replace("\r\n", "\n").strip()
-    if not body:
-        return None
-    body = re.sub(r"(?is)^paroles de la chanson[^\n]*\n+", "", body).strip()
-    if not body:
-        return None
-    hdr = f"{title} - {artist}" if artist else title
-    return f"{hdr} [Fallback]", [(None, ln) for ln in body.splitlines()]
-
-
-def format_mmss(secs: Any) -> str:
-    """Format seconds as MM:SS or H:MM:SS."""
-    try:
-        total = max(0, int(float(secs)))
-    except (TypeError, ValueError):
-        total = 0
-    mins, rem = divmod(total, 60)
-    hrs, mins = divmod(mins, 60)
-    if hrs > 0:
-        return f"{hrs}:{mins:02d}:{rem:02d}"
-    return f"{mins:02d}:{rem:02d}"
 
 
 def calc_seek_target(rel_x: int, bar_width: int, duration: float) -> float:
@@ -164,110 +133,6 @@ def truncate_width(text: str, max_cols: int, ellipsis: str = "…") -> str:
         out.append(ch)
         cur += cw
     return "".join(out) + ellipsis
-
-
-def extract_video_id(value: str) -> str:
-    """Extract 11-char YouTube video ID from URL or return raw value."""
-    if VIDEO_ID_RE.match(value):
-        return value
-    m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", value)
-    if m:
-        return m.group(1)
-    m = re.search(r"youtu\.be/([A-Za-z0-9_-]{11})", value)
-    if m:
-        return m.group(1)
-    return value
-
-
-def _norm_meta(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
-
-
-def extract_primary_artist(metadata: Any) -> str:
-    """Extract primary artist string from mpv metadata dict."""
-    if not isinstance(metadata, dict):
-        return ""
-    lowered = {str(k).lower(): str(v).strip() for k, v in metadata.items() if v}
-    raw_artist = lowered.get("artist", "")
-    uploader = re.sub(r"\s+-\s*Topic$", "", lowered.get("uploader", ""), flags=re.IGNORECASE).strip()
-
-    first_artist = ""
-    if raw_artist:
-        first_artist = re.split(r"[,;]|\s+(?:feat\.?|ft\.?)\s+", raw_artist, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-
-    if uploader and first_artist and _norm_meta(uploader) in _norm_meta(first_artist):
-        return uploader
-    return first_artist or uploader
-
-
-def pick_best_lyrics_candidate(
-    items: list[dict[str, Any]],
-    title: str,
-    artist: str = "",
-    duration: float = 0.0,
-) -> dict[str, Any] | None:
-    """Score LRCLIB search results by artist, title, duration, and synced availability."""
-    n_title = _norm_meta(title)
-    n_artist = _norm_meta(artist)
-    best_score = -10**9
-    best_item: dict[str, Any] | None = None
-    best_artist_ok = False
-    best_dur_diff: float | None = None
-
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        has_synced = bool((it.get("syncedLyrics") or "").strip())
-        has_plain = bool((it.get("plainLyrics") or "").strip())
-        if not (has_synced or has_plain):
-            continue
-
-        c_title = _norm_meta(str(it.get("trackName") or ""))
-        c_artist = _norm_meta(str(it.get("artistName") or ""))
-        score = 0
-        artist_ok = False
-
-        if n_artist:
-            if c_artist and (n_artist in c_artist or c_artist in n_artist):
-                score += 50
-                artist_ok = True
-            else:
-                score -= 40
-
-        if n_title and c_title:
-            if n_title == c_title:
-                score += 35
-            elif n_title in c_title or c_title in n_title:
-                score += 15
-
-        dur_diff: float | None = None
-        if duration > 0 and it.get("duration") is not None:
-            try:
-                dur_diff = abs(float(it["duration"]) - float(duration))
-                if dur_diff <= 5.0:
-                    score += 30
-                elif dur_diff <= 15.0:
-                    score += 15
-                elif dur_diff > 30.0:
-                    score -= 30
-            except (TypeError, ValueError):
-                dur_diff = None
-
-        if has_synced:
-            score += 10
-
-        if score > best_score:
-            best_score = score
-            best_item = it
-            best_artist_ok = artist_ok
-            best_dur_diff = dur_diff
-
-    if best_item is None:
-        return None
-    if n_artist and not best_artist_ok:
-        if duration <= 0 or best_dur_diff is None or best_dur_diff > 15.0:
-            return None
-    return best_item
 
 
 def enrich_tsv_entry(path: Path, vid: str, title: str, meta: str) -> bool:
@@ -353,86 +218,6 @@ class Hitbox:
         return self.x0 <= x < self.x1 and self.y0 <= y < self.y1
 
 
-class MpvClient:
-    """Fast single-socket UNIX IPC client for mpv."""
-
-    def __init__(self, sock_path: str, timeout: float = 0.4) -> None:
-        self.sock_path = sock_path
-        self.timeout = timeout
-
-    def batch_get(self, props: list[str]) -> dict[str, Any] | None:
-        if not props or not os.path.exists(self.sock_path):
-            return None
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(self.timeout)
-        try:
-            s.connect(self.sock_path)
-            payload = "".join(
-                json.dumps({"command": ["get_property", p], "request_id": idx}) + "\n"
-                for idx, p in enumerate(props, 1)
-            )
-            s.sendall(payload.encode("utf-8"))
-            results: dict[str, Any] = {}
-            seen_ids: set[int] = set()
-            buf = b""
-            while len(seen_ids) < len(props):
-                chunk = s.recv(8192)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    raw_line, buf = buf.split(b"\n", 1)
-                    text = raw_line.decode("utf-8", errors="replace").strip()
-                    if not text:
-                        continue
-                    try:
-                        obj = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    req_id = obj.get("request_id")
-                    if isinstance(req_id, int) and 1 <= req_id <= len(props):
-                        seen_ids.add(req_id)
-                        if obj.get("error") == "success":
-                            results[props[req_id - 1]] = obj.get("data")
-                        else:
-                            results[props[req_id - 1]] = None
-            return results if seen_ids else None
-        except OSError:
-            return None
-        finally:
-            s.close()
-
-    def send(self, command: list[Any]) -> bool:
-        if not os.path.exists(self.sock_path):
-            return False
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(self.timeout)
-        try:
-            s.connect(self.sock_path)
-            s.sendall((json.dumps({"command": command, "request_id": 1}) + "\n").encode("utf-8"))
-            buf = b""
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    return False
-                buf += chunk
-                while b"\n" in buf:
-                    raw_line, buf = buf.split(b"\n", 1)
-                    text = raw_line.decode("utf-8", errors="replace").strip()
-                    if not text:
-                        continue
-                    try:
-                        obj = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    if obj.get("request_id") == 1:
-                        return obj.get("error") == "success"
-        except OSError:
-            return False
-        finally:
-            s.close()
-
-
 class SovereignDashboard:
     """Interactive clickable & realtime curses dashboard for musicctl."""
 
@@ -457,12 +242,14 @@ class SovereignDashboard:
 
         self.mpv = MpvClient(self.sock_path)
         self.lock = threading.Lock()
+        self.ui_events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
 
         self.active_tab = "search" if initial_query else "home"
         self.right_tab = "upnext"
         self.search_query = initial_query
         self.search_focus = False
         self.search_loading = False
+        self.search_seq = 0
         self.show_help = False
 
         self.tracks: list[tuple[str, str, str, str]] = []
@@ -614,8 +401,7 @@ class SovereignDashboard:
                     merged.append(row)
             self.tracks = merged
         elif self.active_tab == "search":
-            with self.lock:
-                self.tracks = list(self.search_results)
+            self.tracks = list(self.search_results)
         elif self.active_tab == "fav":
             self.tracks = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
         elif self.active_tab == "hist":
@@ -644,8 +430,50 @@ class SovereignDashboard:
         if self.scroll_top > self.selected_idx:
             self.scroll_top = self.selected_idx
 
+    def drain_ui_events(self) -> None:
+        while True:
+            try:
+                kind, payload = self.ui_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "cli_done":
+                toast_msg, reload_after = payload
+                if toast_msg:
+                    self.set_toast(toast_msg)
+                if reload_after:
+                    self.poll_mpv()
+                    self.load_tab_items()
+            elif kind == "search_done":
+                seq, rows, ok = payload
+                if seq != self.search_seq:
+                    continue
+                self.search_loading = False
+                if ok:
+                    self.search_results = rows
+                    if self.active_tab == "search":
+                        self.selected_idx = 0
+                        self.scroll_top = 0
+                        self.load_tab_items()
+                    self.set_toast(f"Found {len(rows)} tracks")
+                else:
+                    self.set_toast("Search failed")
+            elif kind == "lyrics_done":
+                track_key, header, lines = payload
+                if track_key != self.lyrics_track_key:
+                    continue
+                self.lyrics_header = header
+                self.lyrics_lines = lines
+                self.lyrics_loading = False
+            elif kind == "heal_done":
+                vids, any_updated = payload
+                for vid in vids:
+                    self.heal_inflight.discard(vid)
+                if any_updated and self.active_tab in ("home", "hist"):
+                    self.load_tab_items()
+
     def run_cli_async(self, args: list[str], toast: str = "", reload_after: bool = False) -> None:
         def worker() -> None:
+            msg = ""
             try:
                 proc = subprocess.run(
                     [self.bin_path, *args],
@@ -655,17 +483,15 @@ class SovereignDashboard:
                     timeout=30,
                 )
                 if proc.returncode == 0:
-                    if toast:
-                        self.set_toast(toast)
+                    msg = toast
                 else:
-                    err = (proc.stderr or proc.stdout or "Command failed").strip().splitlines()[-1]
-                    self.set_toast(re.sub(r"\x1b\[[0-9;]*m", "", err)[:42])
+                    err_lines = (proc.stderr or proc.stdout or "Command failed").strip().splitlines()
+                    err = err_lines[-1] if err_lines else "Command failed"
+                    msg = re.sub(r"\x1b\[[0-9;]*m", "", err)[:42]
             except Exception as exc:
-                self.set_toast(str(exc)[:42])
+                msg = str(exc)[:42]
             finally:
-                if reload_after:
-                    self.poll_mpv()
-                    self.load_tab_items()
+                self.ui_events.put(("cli_done", (msg, reload_after)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -676,9 +502,13 @@ class SovereignDashboard:
         self.active_tab = "search"
         self.search_loading = True
         self.search_focus = False
+        self.search_seq += 1
+        seq = self.search_seq
         self.set_toast(f"Searching: {q[:24]}...")
 
         def worker() -> None:
+            rows: list[tuple[str, str, str, str]] = []
+            ok = False
             try:
                 proc = subprocess.run(
                     [self.bin_path, "search", q],
@@ -687,21 +517,15 @@ class SovereignDashboard:
                     text=True,
                     timeout=15,
                 )
-                rows: list[tuple[str, str, str, str]] = []
                 for ln in proc.stdout.splitlines():
                     parts = ln.split("\t")
                     if len(parts) >= 2 and parts[0]:
                         rows.append((parts[0], parts[1], parts[2] if len(parts) > 2 else "", "[YTM]"))
-                with self.lock:
-                    self.search_results = rows
-                self.selected_idx = 0
-                self.scroll_top = 0
-                self.load_tab_items()
-                self.set_toast(f"Found {len(rows)} tracks")
+                ok = True
             except Exception:
-                self.set_toast("Search failed")
+                ok = False
             finally:
-                self.search_loading = False
+                self.ui_events.put(("search_done", (seq, rows, ok)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -767,6 +591,8 @@ class SovereignDashboard:
         self.lyrics_lines = []
 
         def worker() -> None:
+            header = f"No matching lyrics: {lbl}"
+            lines: list[tuple[float | None, str]] = []
             try:
                 chosen: dict[str, Any] | None = None
                 headers = {"User-Agent": "musicctl/2.0"}
@@ -819,39 +645,24 @@ class SovereignDashboard:
                                 fb_raw = resp.read().decode("utf-8", errors="replace")
                             fb_res = parse_fallback_lyrics_json(fb_raw, title, artist)
                             if fb_res is not None:
-                                self.lyrics_header, self.lyrics_lines = fb_res
-                                return
+                                header, lines = fb_res
                         except Exception:
                             pass
-                    self.lyrics_header = f"No matching lyrics: {lbl}"
-                    self.lyrics_lines = []
-                    return
-                t_name = chosen.get("trackName") or title
-                a_name = chosen.get("artistName") or artist
-                self.lyrics_header = f"{t_name} - {a_name} [LRCLIB]".strip(" -")
-                synced = (chosen.get("syncedLyrics") or "").strip()
-                parsed: list[tuple[float | None, str]] = []
-                if synced:
-                    for raw_ln in synced.splitlines():
-                        matches = list(TS_RE.finditer(raw_ln))
-                        if not matches:
-                            continue
-                        txt = TS_RE.sub("", raw_ln).strip() or "..."
-                        for m in matches:
-                            mins = int(m.group(1))
-                            secs = int(m.group(2))
-                            frac = float("0." + (m.group(3) or "0"))
-                            parsed.append((mins * 60 + secs + frac, txt))
-                    parsed.sort(key=lambda x: x[0] or 0.0)
                 else:
-                    plain = (chosen.get("plainLyrics") or "").strip()
-                    parsed = [(None, ln) for ln in plain.splitlines()]
-                self.lyrics_lines = parsed
+                    t_name = chosen.get("trackName") or title
+                    a_name = chosen.get("artistName") or artist
+                    header = f"{t_name} - {a_name} [LRCLIB]".strip(" -")
+                    synced = (chosen.get("syncedLyrics") or "").strip()
+                    if synced:
+                        lines = [(t, txt) for t, txt in parse_synced_lyrics_lines(synced)]
+                    else:
+                        plain = (chosen.get("plainLyrics") or "").strip()
+                        lines = [(None, ln) for ln in plain.splitlines()]
             except Exception:
-                self.lyrics_header = "Lyrics lookup failed"
-                self.lyrics_lines = []
+                header = "Lyrics lookup failed"
+                lines = []
             finally:
-                self.lyrics_loading = False
+                self.ui_events.put(("lyrics_done", (track_key, header, lines)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -874,24 +685,23 @@ class SovereignDashboard:
 
         def worker() -> None:
             any_updated = False
-            for vid in to_heal:
-                try:
-                    oe_url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
-                        {"url": f"https://www.youtube.com/watch?v={vid}", "format": "json"}
-                    )
-                    req = urllib.request.Request(oe_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=3.0) as resp:
-                        data = json.loads(resp.read().decode("utf-8", errors="replace"))
-                    t = str(data.get("title") or "").strip()
-                    author = re.sub(r"\s+-\s*Topic$", "", str(data.get("author_name") or ""), flags=re.I).strip()
-                    if t and enrich_tsv_entry(hist_path, vid, t, author):
-                        any_updated = True
-                except Exception:
-                    pass
-                finally:
-                    self.heal_inflight.discard(vid)
-            if any_updated and self.active_tab in ("home", "hist"):
-                self.load_tab_items()
+            try:
+                for vid in to_heal:
+                    try:
+                        oe_url = "https://www.youtube.com/oembed?" + urllib.parse.urlencode(
+                            {"url": f"https://www.youtube.com/watch?v={vid}", "format": "json"}
+                        )
+                        req = urllib.request.Request(oe_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req, timeout=3.0) as resp:
+                            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                        t = str(data.get("title") or "").strip()
+                        author = re.sub(r"\s+-\s*Topic$", "", str(data.get("author_name") or ""), flags=re.I).strip()
+                        if t and enrich_tsv_entry(hist_path, vid, t, author):
+                            any_updated = True
+                    except Exception:
+                        pass
+            finally:
+                self.ui_events.put(("heal_done", (to_heal, any_updated)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1534,6 +1344,7 @@ class SovereignDashboard:
             self.trigger_search(self.search_query)
 
         while True:
+            self.drain_ui_events()
             self.tick += 1
             if self.tick % 2 == 0:
                 self.poll_mpv()
