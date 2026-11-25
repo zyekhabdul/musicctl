@@ -202,7 +202,7 @@ assert_ok "daemon socket cleaned up" test ! -S "$MUSICCTL_SOCKET"
 
 # 10. Version, doctor, config precedence, synced lyrics JSON, and auto-cache resolution
 VER_OUT="$("$BIN" --version)"
-assert_contains "version prints 1.1.0" "$VER_OUT" "musicctl 1.1.0"
+assert_contains "version prints 2.0.0" "$VER_OUT" "musicctl 2.0.0"
 
 DOC_OUT="$("$BIN" doctor)"
 assert_contains "doctor checks mpv" "$DOC_OUT" "mpv"
@@ -255,7 +255,7 @@ with wave.open(sys.argv[1], "wb") as w:
     w.setnchannels(1)
     w.setsampwidth(2)
     w.setframerate(8000)
-    w.writeframes(b"\x00\x00" * 16000)
+    w.writeframes(b"\x00\x00" * 80000)
 PY
 assert_ok "play local wav" "$BIN" play "$WAV_FILE" >/dev/null
 assert_ok "set session volume 72" "$BIN" vol 72 >/dev/null
@@ -267,6 +267,8 @@ RESUME_OUT="$("$BIN" resume)"
 assert_contains "resume restores session" "$RESUME_OUT" "Resumed session"
 RESUMED_JSON="$("$BIN" status --json)"
 assert_ok "resumed volume & loop preserved" jq -e '.volume == 72 and .loop == "all"' <<<"$RESUMED_JSON" >/dev/null
+PREVIEW_OUT="$("$BIN" _preview $'IR7tYHdYN2Q\tTo the Bone\tPamungkas • 5:45\t[YTM]')"
+assert_ok "preview hides 1.000000x speed" bash -c '! grep -qF "1.000000x" <<<"$1"' _ "$PREVIEW_OUT"
 "$BIN" stop >/dev/null
 
 # 12. Desktop entry validation & install.sh dry-install/uninstall
@@ -276,11 +278,122 @@ fi
 PREFIX_TMP="$TMP_DIR/prefix"
 assert_ok "install.sh dry install" /home/aomiqaza/Projects/musicctl/install.sh --prefix "$PREFIX_TMP" >/dev/null
 assert_ok "installed bin exists" test -x "$PREFIX_TMP/bin/musicctl"
+assert_ok "installed tui.py exists" test -f "$PREFIX_TMP/share/musicctl/tui.py"
 assert_ok "installed desktop exists" test -f "$PREFIX_TMP/share/applications/musicctl.desktop"
 assert_ok "install.sh uninstall" /home/aomiqaza/Projects/musicctl/install.sh --prefix "$PREFIX_TMP" --uninstall >/dev/null
 assert_ok "installed bin removed" test ! -e "$PREFIX_TMP/bin/musicctl"
+assert_ok "installed tui.py removed" test ! -e "$PREFIX_TMP/share/musicctl/tui.py"
 
-# 13. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
+# 13. WP1B-WP1F: Queue move, pl move/sync/prune, fallback lyrics, Spotify HTML parser, 3-tier quality & pluggable providers
+# 13a. Playlist TSV move (WP1B)
+assert_ok "pl create mix" "$BIN" pl create mix >/dev/null
+printf 'trkA1111111\tFirst Song\tArtist A • 3:00\ntrkB2222222\tSecond Song\tArtist B • 3:10\ntrkC3333333\tThird Song\tArtist C • 3:20\n' >"$MUSICCTL_DATA_DIR/playlists/mix.tsv"
+assert_ok "pl move 3 -> 1" "$BIN" pl move mix 3 1 >/dev/null
+PL_MOVED="$(head -n 1 "$MUSICCTL_DATA_DIR/playlists/mix.tsv")"
+assert_contains "pl move puts Third Song first" "$PL_MOVED" "trkC3333333"
+
+# 13b. Live mpv queue move (WP1B) with 3 generated WAV tracks
+WAV1="$TMP_DIR/q1.wav"
+WAV2="$TMP_DIR/q2.wav"
+WAV3="$TMP_DIR/q3.wav"
+cp -f "$WAV_FILE" "$WAV1" && cp -f "$WAV_FILE" "$WAV2" && cp -f "$WAV_FILE" "$WAV3"
+assert_ok "play q1" "$BIN" play "$WAV1" >/dev/null
+assert_ok "add q2" "$BIN" add "$WAV2" >/dev/null
+assert_ok "add q3" "$BIN" add "$WAV3" >/dev/null
+assert_ok "move queue 1 -> 3" "$BIN" move 1 3 >/dev/null
+Q_AFTER_DOWN="$("$BIN" queue | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+assert_ok "queue move down shows #1 q2" bash -c 'grep -qE "1\..*q2\.wav" <<<"$1"' _ "$Q_AFTER_DOWN"
+assert_ok "queue move down shows #3 q1" bash -c 'grep -qE "3\..*q1\.wav" <<<"$1"' _ "$Q_AFTER_DOWN"
+assert_ok "move queue 3 -> 1" "$BIN" move 3 1 >/dev/null
+Q_AFTER_UP="$("$BIN" queue | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+assert_ok "queue move up restores #1 q1" bash -c 'grep -qE "1\..*q1\.wav" <<<"$1"' _ "$Q_AFTER_UP"
+"$BIN" stop >/dev/null
+
+# 13c. Offline pl sync cache skip + prune (WP1C)
+mkdir -p "$MUSICCTL_CACHE_DIR/audio"
+printf 'cached1' >"$MUSICCTL_CACHE_DIR/audio/trkA1111111.opus"
+printf 'cached2' >"$MUSICCTL_CACHE_DIR/audio/trkB2222222.opus"
+printf 'cached3' >"$MUSICCTL_CACHE_DIR/audio/trkC3333333.opus"
+printf 'orphan' >"$MUSICCTL_CACHE_DIR/audio/orphan99999.opus"
+SYNC_OUT="$("$BIN" pl sync mix --prune)"
+assert_contains "pl sync skips 3 cached tracks" "$SYNC_OUT" "0 fetched, 3 cached, 0 failed"
+assert_ok "pl sync --prune deletes orphan cache file" test ! -f "$MUSICCTL_CACHE_DIR/audio/orphan99999.opus"
+assert_ok "pl sync --prune keeps playlist track cache" test -f "$MUSICCTL_CACHE_DIR/audio/trkA1111111.opus"
+"$BIN" pl delete mix >/dev/null
+"$BIN" cache clear >/dev/null
+
+# 13d. Fallback lyrics parser (WP1D)
+FB_JSON='{"lyrics":"Paroles de la chanson Test par Artist\r\nLine one\nLine two"}'
+FB_PARSED="$(printf '%s' "$FB_JSON" | "$BIN" _parse_fallback_lyrics "Test" "Artist")"
+assert_contains "fallback lyrics includes [Fallback] header" "$FB_PARSED" "=== Test - Artist [Fallback] ==="
+assert_contains "fallback lyrics strips boilerplate and keeps body" "$FB_PARSED" "Line one"
+assert_ok "fallback lyrics stripped French prefix" bash -c '! grep -qF "Paroles de la chanson" <<<"$1"' _ "$FB_PARSED"
+
+# 13e. Public Spotify playlist HTML & OpenGraph fixtures (WP1E)
+SP_NEXT_HTML='<html><head><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"trackList":[{"title":"One Only","subtitle":"Pamungkas"},{"title":"Monolog","artists":[{"name":"Pamungkas"}]}]}}}}}}</script></head></html>'
+SP_PARSED="$(printf '%s' "$SP_NEXT_HTML" | "$BIN" _parse_spotify_html)"
+assert_contains "spotify __NEXT_DATA__ extracts One Only" "$SP_PARSED" "One Only	Pamungkas"
+assert_contains "spotify __NEXT_DATA__ extracts Monolog" "$SP_PARSED" "Monolog	Pamungkas"
+
+SP_OG_HTML='<html><head><meta property="og:title" content="sailing" /><meta property="og:description" content="grentperez · Song · 2024" /></head></html>'
+SP_OG_PARSED="$(printf '%s' "$SP_OG_HTML" | "$BIN" _parse_spotify_html)"
+assert_contains "spotify OpenGraph extracts single track" "$SP_OG_PARSED" "sailing	grentperez"
+
+# 13f. 3-tier quality state, ffprobe validator, ordered provider chain & cover/tag embed (WP1F)
+Q_DEF="$("$BIN" quality status)"
+assert_contains "default quality is cd" "$Q_DEF" "Quality: cd"
+assert_ok "set quality hires" "$BIN" quality hires >/dev/null
+assert_contains "quality persists hires" "$("$BIN" quality status)" "Quality: hires"
+assert_contains "quality cycle hires->ask" "$("$BIN" quality cycle)" "Quality: ask"
+assert_contains "quality cycle ask->small" "$("$BIN" quality cycle)" "Quality: small"
+assert_ok "invalid quality tier rejected" bash -c '! "$1" quality ultra >/dev/null 2>&1' _ "$BIN"
+assert_ok "set quality back to cd" "$BIN" quality cd >/dev/null
+
+FLAC_SRC="$TMP_DIR/sample10.flac"
+ART_SRC="$MUSICCTL_CACHE_DIR/art/dQw4w9WgXcQ.jpg"
+mkdir -p "$MUSICCTL_CACHE_DIR/art"
+ffmpeg -y -v error -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -c:a flac "$FLAC_SRC"
+ffmpeg -y -v error -f lavfi -i color=c=blue:s=64x64:d=1 -frames:v 1 "$ART_SRC"
+
+VAL_OK="$("$BIN" _validate_audio "$FLAC_SRC" 10 1)"
+assert_ok "ffprobe validates 10s lossless FLAC" jq -e '.codec == "flac" and .sample_rate == 44100' <<<"$VAL_OK" >/dev/null
+assert_ok "ffprobe rejects duration mismatch" bash -c '! "$1" _validate_audio "$2" 180 0 >/dev/null 2>&1' _ "$BIN" "$FLAC_SRC"
+
+PROV_DIR="$TMP_DIR/providers"
+mkdir -p "$PROV_DIR"
+cat >"$PROV_DIR/10-empty.sh" <<'PROV1'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 0
+PROV1
+cat >"$PROV_DIR/20-mock-flac.sh" <<PROV2
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"flac","bit_depth":16,"sample_rate":44100}\n' "$FLAC_SRC"
+PROV2
+chmod +x "$PROV_DIR/10-empty.sh" "$PROV_DIR/20-mock-flac.sh"
+export MUSICCTL_PROVIDERS_DIR="$PROV_DIR"
+
+PROV_RES="$("$BIN" _resolve_provider "download" "cd" "dQw4w9WgXcQ" "Test Title" "Test Artist" "" 10)"
+assert_ok "provider chain skips empty 10-empty and picks 20-mock-flac" jq -e '.provider == "20-mock-flac.sh" and .codec == "flac"' <<<"$PROV_RES" >/dev/null
+
+DL_CD_OUT="$("$BIN" dl --quality cd "dQw4w9WgXcQ")"
+assert_contains "dl --quality cd uses mock flac provider" "$DL_CD_OUT" "20-mock-flac.sh"
+CD_FLAC_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
+assert_ok "dl --quality cd writes .flac file" test -s "$CD_FLAC_OUT"
+FLAC_PROBE="$(ffprobe -v error -show_entries stream=codec_type,codec_name:format_tags=title -of json "$CD_FLAC_OUT")"
+assert_ok "dl --quality cd embeds title tag and cover art" jq -e '((.format.tags.title // .format.tags.TITLE) == "dQw4w9WgXcQ") and ([.streams[].codec_type] | index("video") != null)' <<<"$FLAC_PROBE" >/dev/null
+
+rm -f "$CD_FLAC_OUT"
+DL_SM_OUT="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+assert_contains "dl --quality small transcodes FLAC to AAC" "$DL_SM_OUT" "aac"
+SM_M4A_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].m4a"
+assert_ok "dl --quality small writes .m4a file" test -s "$SM_M4A_OUT"
+M4A_PROBE="$(ffprobe -v error -show_entries stream=codec_name:format_tags=title -of json "$SM_M4A_OUT")"
+assert_ok "dl --quality small produces valid AAC M4A with title tag" jq -e '(.streams[0].codec_name == "aac") and (.format.tags.title == "dQw4w9WgXcQ")' <<<"$M4A_PROBE" >/dev/null
+unset MUSICCTL_PROVIDERS_DIR
+
+# 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
 if [[ "$OFFLINE" != "1" ]]; then
   SEARCH_OUT="$("$BIN" search "pamungkas to the bone")"
   assert_contains "live YTM search returns To the Bone" "$SEARCH_OUT" "IR7tYHdYN2Q"
