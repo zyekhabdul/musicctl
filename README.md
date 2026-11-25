@@ -94,13 +94,16 @@ musicctl stop                   # Save session and stop background mpv daemon
 | Control | Action |
 | --- | --- |
 | Click / Double-click / Right-click row | Select / Play or Jump / Enqueue track |
-| Click progress / volume bar, Wheel | Seek timestamp / Set volume / Scroll list |
-| `/` or `Ctrl-S` | Focus search input (`Esc` to leave) |
-| `1`-`7` / `Tab` | Switch left tabs (`7 Pl` playlists) / Cycle right panel (`Up Next`, `Lyrics`, `Info`, `DL`) |
+| Click progress / volume bar, Wheel | Seek timestamp / Set volume / Scroll list or drawer under cursor |
+| `/` or `Ctrl-S` (`Ctrl-U` clear, `Esc` leave) | Focus search input (`Ctrl-L` clear outside input) |
+| `h` / `l` or `Left` / `Right` | Focus Left List / Right Drawer |
+| `v` / `z` | Cycle adaptive layout (`auto`/`split`/`stacked`/`focus`) / Toggle drawer |
+| `1`-`7` / `U` `Y` `I` `D` / `Tab` (`Shift-Tab`) | Switch left tabs / Jump to drawer tab / Cycle drawer tabs |
 | `C` / `T` / `L` / `Backspace` | Cycle catalog / search type / local grouping (`Flat`/`Artists`/`Albums`) / Back |
-| `j`/`k` or `Up`/`Down`, `g`/`G` | Move cursor (`g` top, `G` bottom) |
+| `j`/`k` (`PgUp`/`PgDn`, `g`/`G`) | Move or page cursor in active focused pane |
 | `J` / `K` (on Queue tab) | Move selected queue track down / up |
-| `Enter` / `a` / `f` / `r` / `d` | Play or Open / Enqueue / Toggle fav / Queue radio / Non-blocking download |
+| `Enter` / `a` / `f` / `r` / `d` | Play or Jump / Enqueue / Toggle fav / Queue radio / Non-blocking download |
+| `P` / `E` / `W` / `S` / `X` | Play All / +Queue All / Download All / Sync playlist / Cancel downloads |
 | `Space` / `n` / `b` / `x` | Pause or Play / Next / Prev / Stop daemon |
 | `o` / `u` / `Q` / `e` / `N` / `A` / `m` | Cycle loop / Shuffle / Cycle quality / Cycle EQ / Toggle norm / Autoplay / Mute |
 | `+` or `=` / `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |

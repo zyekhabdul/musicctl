@@ -103,13 +103,47 @@
 
 ---
 
-## 3. Future Milestone Outline — Work Packet 3 (`v2.3.0`: Modern TUI & Ecosystem Max)
+## 3. Active Work Packet 3 (`v2.3.0`: Adaptive Full-Space Layout, Lightweight Animation & Hybrid Keyboard+Mouse TUI)
 
-*(High-level roadmap only; expand into an active work packet after WP2 is verified and committed.)*
+- **Track**: Track B / Spec-Driven Incremental Delivery (Zero-Bloat CLI & TUI)
+- **Status**: COMPLETED [4/4 CHUNKS]
+- **Scope Cuts (Out of Scope / Dropped)**:
+  - Removed `cava` FFT daemon, Kitty/Sixel/iTerm2 multi-protocol image engines, multi-theme switcher, `musicctl stats` analytics, and MusicBrainz/AcoustID tagger to preserve the ~20-30 MB footprint and zero-bloat UX.
 
-- **Real-Time Audio Visualizer**: Optional `cava` raw FFT pipe integration in `lib/tui.py` replacing `math.sin` animation (graceful fallback when `cava` is absent).
-- **HD Terminal Cover Art Protocol**: Auto-detect Kitty Graphics / Sixel / iTerm2 protocol support with `chafa` 256-color symbol fallback.
-- **3-Tier Lyrics & Live Sync Offset**: Add YouTube timedtext/captions as tier-3 lyrics fallback (covering indie/local tracks missing from LRCLIB/lyrics.ovh) and interactive `+/- 0.5s` sync offset controls.
-- **Configurable TUI Themes**: Built-in Tokyo Night, Catppuccin Mocha, Gruvbox Dark, and Nord palettes selectable via `MUSICCTL_THEME`.
-- **Listening Analytics (`musicctl stats`)**: Play counts, top artists/tracks, and listening hours derived from timestamped playback history.
-- **MusicBrainz / AcoustID Local Tag Fixer**: Optional CLI enrichment command for cleaning messy local audio tags.
+### [x] Chunk WP3A: Responsive Adaptive Layout Engine (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Replace fixed 52/48 side-by-side split and hardcoded `top_h = min(13, ...)` (which leaves half the right pane/screen empty on tall or portrait terminals) with aspect-aware layout calculation:
+     - **Wide/Landscape** (`w >= 110` and wide aspect): proportional ~58/42 split with columnar list formatting and balanced right pane.
+     - **Tall/Portrait/Split** (`w < 110` or tall aspect): stacked vertical layout — compact full-width `NOW PLAYING` header card + full-width track list + collapsible bottom drawer (`Up Next` / `Lyrics` / `Info` / `DL`) using 100% terminal width without half-empty void.
+  2. Add layout mode cycling (`v`: `auto` -> `split` -> `stacked` -> `focus`) and drawer/side-pane toggle (`z`).
+- **Definition of Done (DoD)**:
+  - Layout helper returns distinct balanced geometry for wide, tall/portrait, and focus modes without overlapping or clipped borders.
+
+### [x] Chunk WP3B: Lightweight Animation, Art Scaling & Lyrics Race Fix (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Keep animation 100% pure Python stdlib (zero external processes like `cava`), upgrading the hardcoded 28-char wave (`spec_w = min(info_w, 28)`) into a full-width, subtle, low-CPU multi-bar pulse/progress accent matching card width.
+  2. Scale `chafa` symbol preview dynamically to available card dimensions instead of hardcoded `22x10`.
+  3. Fix the `watch?v=<id>` lyrics race bug: defer `fetch_lyrics_async` while `media-title` is still a raw URL/video-ID placeholder and trigger automatically once `mpv` resolves the real title/artist; render compact contextual track info/quick-hints when Lyrics or Queue is empty so the panel is never an empty black void.
+- **Definition of Done (DoD)**:
+  - `watch?v=` titles defer lyrics fetch until real metadata resolves, spectrum width adapts to card width, and empty sub-panels show helpful contextual hints.
+
+### [x] Chunk WP3C: Full Hybrid Keyboard + Mouse Parity (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Guarantee every clickable control has a first-class keyboard shortcut and visible compact key hint on buttons (e.g. `[b Prev]`, `[Space Pause]`, `[n Next]`, `[o Loop]`).
+  2. Add dual-pane focus navigation (`h`/`l` or `Left`/`Right`) with active focused border highlight; when Right Panel is focused, support `j`/`k`, `Up`/`Down`, `PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `g`/`G` scrolling across `Up Next`, `Lyrics`, `Info`, and `DL`, plus `Enter` to jump in `Up Next`.
+  3. Add fast list paging (`PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `Home`/`End`) in Left List.
+  4. Add keyboard shortcuts for mouse-only actions: `P` (`Play All`), `E` (`+Q All`), `W` (`DL All`), `X` (`Cancel DL` on DL tab), `Ctrl-U`/`Ctrl-K` (clear search), `Shift-Tab` (reverse right-tab cycle), plus direct right-tab keys (`1-4` when right pane focused, or `U`/`Y`/`I`/`D`).
+  5. Update `?` Help modal to show unified hybrid Keyboard + Mouse cheat sheet.
+- **Definition of Done (DoD)**:
+  - All clickable controls have matching keyboard triggers, pane focus toggles between left/right panes, and right-pane content scrolls cleanly via keyboard.
+
+### [x] Chunk WP3D: Tests, Docs & Verification (`tests/test_tui.py`, `README.md`)
+- **Target Files**: `tests/test_tui.py`, `README.md`
+- **Steps**:
+  1. Add unit tests in `tests/test_tui.py` for adaptive layout geometry (`split` vs `stacked` vs `focus`), pane focus switching & right-pane scrolling, new keyboard shortcuts (`P`, `E`, `W`, `X`, `v`, `z`, `PgUp`/`PgDn`), and `watch?v=` lyrics deferral/re-trigger.
+  2. Update `README.md` keybindings table and verify `make lint && make test-offline` exits `0`.
+- **Definition of Done (DoD)**:
+  - `make lint && make test-offline` exits `0` with full unit coverage for WP3A-WP3C.
