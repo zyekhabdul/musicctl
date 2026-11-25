@@ -9,6 +9,7 @@
 - Added 3-tier audio quality (`small` / `cd` / `hires` / `ask`), ordered UNIX pluggable provider chain (`$MUSICCTL_PROVIDERS_DIR`), `ffprobe` audio integrity/duration validation, `ffmpeg` small-tier transcode & metadata/cover embedding, and lossless codec/bit-depth badges in `lib/tui.py`.
 - Hardened TUI worker concurrency (`queue.SimpleQueue` main-loop dispatch + stale `track_key`/`search_seq` guards), Bash array quoting in `embed_metadata_cover` fallback, `cmd_tui`/`cmd_sleep` env forwarding, and portable `SCRIPT_DIR`/`ROOT_DIR` paths in `tests/test_musicctl.sh`.
 - Consolidated shared Python `mpv` IPC, artist extraction, and lyrics parsing helpers into `lib/common.py`, and replaced `format_mmss`/`ascii_bar` Python spawns with pure-Bash arithmetic.
+- Improved streaming resilience and TUI ergonomics: escaped mpv `http-header-fields`, preflight provider stream probing with YTM fallback, all-lossless `small` transcoding, direct Spotify playlist/album `play`/`add`, UTF-8 search input via `get_wch()`, and album art color-pair recycling.
 
 ## v2.0.0 (2026-11-25)
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import curses
 import dataclasses
 import json
+import locale
 import math
 import os
 import queue
@@ -102,6 +103,19 @@ def calc_vol_target(rel_x: int, bar_width: int, max_vol: int = 100) -> int:
     clamped = max(0, min(rel_x, bar_width - 1))
     ratio = clamped / float(bar_width - 1)
     return int(round(ratio * max_vol))
+
+
+def apply_search_key(query: str, key: int | str) -> tuple[str, str]:
+    """Apply a curses get_wch() key to the search query buffer -> (new_query, action)."""
+    if key in (27, "\x1b"):
+        return query, "blur"
+    if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+        return query, "submit"
+    if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
+        return query[:-1], "stay"
+    if isinstance(key, str) and len(key) == 1 and key.isprintable() and ord(key) >= 32:
+        return query + key, "stay"
+    return query, "stay"
 
 
 def display_width(text: str) -> int:
@@ -269,6 +283,7 @@ class SovereignDashboard:
         self.heal_inflight: set[str] = set()
         self.healed_vids: set[str] = set()
         self.art_pairs: dict[tuple[int, int], int] = {}
+        self.last_art_vid = ""
         self.next_art_pair = ART_PAIR_START
         self.max_pairs = 64
 
@@ -329,6 +344,14 @@ class SovereignDashboard:
             ]:
                 bg = curses.COLOR_CYAN if idx in (PAIR_PILL_ACTIVE, PAIR_SEL, PAIR_TOAST) else -1
                 curses.init_pair(idx, fg, bg)
+
+    def reset_art_pairs_for_vid(self, art_vid: str) -> bool:
+        if art_vid and art_vid != self.last_art_vid:
+            self.last_art_vid = art_vid
+            self.art_pairs.clear()
+            self.next_art_pair = ART_PAIR_START
+            return True
+        return False
 
     def get_art_pair(self, fg: int, bg: int) -> int:
         if curses.COLORS < 256:
@@ -916,6 +939,7 @@ class SovereignDashboard:
 
         info_x = x0 + 2
         if art_rows:
+            self.reset_art_pairs_for_vid(art_vid)
             art_w = min(22, max(len(r) for r in art_rows))
             for ri, row_cells in enumerate(art_rows[: top_h - 2]):
                 for ci, (ch, fg, bg) in enumerate(row_cells[:art_w]):
@@ -1354,12 +1378,13 @@ class SovereignDashboard:
                     self.refresh_local_files_meta()
             self.render()
 
-            ch = self.stdscr.getch()
-            if ch == -1:
+            try:
+                wch = self.stdscr.get_wch()
+            except curses.error:
                 continue
-            if ch == curses.KEY_RESIZE:
+            if wch == curses.KEY_RESIZE:
                 continue
-            if ch == curses.KEY_MOUSE:
+            if wch == curses.KEY_MOUSE:
                 try:
                     _, mx, my, _, bstate = curses.getmouse()
                 except curses.error:
@@ -1382,15 +1407,14 @@ class SovereignDashboard:
                 continue
 
             if self.search_focus:
-                if ch in (27,):  # Esc
+                self.search_query, act = apply_search_key(self.search_query, wch)
+                if act == "blur":
                     self.search_focus = False
-                elif ch in (10, 13, curses.KEY_ENTER):
+                elif act == "submit":
                     self.trigger_search(self.search_query)
-                elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                    self.search_query = self.search_query[:-1]
-                elif 32 <= ch <= 126:
-                    self.search_query += chr(ch)
                 continue
+
+            ch = ord(wch) if isinstance(wch, str) and len(wch) == 1 else wch
 
             if ch in (ord("q"), 3):
                 break
@@ -1458,6 +1482,7 @@ class SovereignDashboard:
 
 
 def main() -> int:
+    locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
     initial_query = " ".join(sys.argv[1:]).strip()
     curses.wrapper(lambda stdscr: SovereignDashboard(stdscr, initial_query).run())

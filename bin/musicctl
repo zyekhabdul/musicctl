@@ -385,13 +385,8 @@ resolve_input() {
     return 0
   fi
   if [[ "$input" =~ ^https?://open\.spotify\.com/track/([A-Za-z0-9]+) ]]; then
-    local track_id="${BASH_REMATCH[1]}" sp_html parsed sp_title sp_artist q top
-    sp_html="$(curl -sSL -m 8 "https://open.spotify.com/embed/track/$track_id" 2>/dev/null || true)"
-    parsed="$(printf '%s' "$sp_html" | parse_spotify_html | head -n 1 || true)"
-    if [[ -z "$parsed" ]]; then
-      sp_html="$(curl -sSL -m 8 "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$track_id" 2>/dev/null || true)"
-      parsed="$(printf '%s' "$sp_html" | parse_spotify_html | head -n 1 || true)"
-    fi
+    local track_id="${BASH_REMATCH[1]}" parsed sp_title sp_artist q top
+    parsed="$(fetch_spotify_tracks "track" "$track_id" "$input" | head -n 1 || true)"
     if [[ -n "$parsed" ]]; then
       IFS=$'\t' read -r sp_title sp_artist <<<"$parsed"
       q="${sp_artist:+$sp_artist }$sp_title"
@@ -462,6 +457,39 @@ cache_audio_bg() {
   disown "$!" 2>/dev/null || true
 }
 
+format_mpv_header_fields() {
+  jq -r 'if (.headers | type) == "object" and (.headers | length) > 0 then [.headers | to_entries[] | ("\(.key): \(.value)" | gsub("\\\\"; "\\\\") | gsub(","; "\\,"))] | join(",") else "" end' 2>/dev/null || true
+}
+
+probe_provider_stream() {
+  local prov_url="${1:-}" prov_json="${2:-}"
+  [[ -n "$prov_url" ]] || return 1
+  if [[ "$prov_url" == file://* ]]; then
+    [[ -s "${prov_url#file://}" ]]
+    return $?
+  elif [[ "$prov_url" == /* ]]; then
+    [[ -s "$prov_url" ]]
+    return $?
+  fi
+  local -a curl_args=()
+  local h_line code
+  if [[ -n "$prov_json" ]]; then
+    while IFS= read -r h_line; do
+      [[ -n "$h_line" ]] && curl_args+=(-H "$h_line")
+    done < <(jq -r '(.headers // {}) | to_entries[] | "\(.key): \(.value)"' <<<"$prov_json" 2>/dev/null || true)
+  fi
+  code="$(curl -sSL -m 3 -I -o /dev/null -w '%{http_code}' "${curl_args[@]}" "$prov_url" 2>/dev/null || true)"
+  if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+    return 0
+  fi
+  if [[ "$code" == "405" || "$code" == "501" ]]; then
+    code="$(curl -sSL -m 3 -r 0-0 -o /dev/null -w '%{http_code}' "${curl_args[@]}" "$prov_url" 2>/dev/null || true)"
+    [[ "$code" =~ ^2[0-9][0-9]$ ]]
+    return $?
+  fi
+  return 1
+}
+
 load_track_target() {
   local id="$1" title="$2" meta="$3" mode="$4"
   local target="" cached="" prov_json="" prov_url="" payload=""
@@ -479,19 +507,27 @@ load_track_target() {
     if [[ -n "$prov_json" ]]; then
       prov_url="$(jq -r '.url // empty' <<<"$prov_json" 2>/dev/null || true)"
     fi
-    if [[ -n "$prov_url" ]]; then
+    if [[ -n "$prov_url" ]] && probe_provider_stream "$prov_url" "$prov_json"; then
       target="$prov_url"
     else
+      prov_url=""
+      prov_json=""
       target="$(id_to_url "$id")"
     fi
   fi
 
   ensure_daemon
-  if [[ -n "$prov_url" && -n "$title" && "$title" != "$id" ]]; then
-    local hdr_arg
-    hdr_arg="$(jq -r 'if (.headers | type) == "object" and (.headers | length) > 0 then [.headers | to_entries[] | "\(.key): \(.value)"] | join(",") else "" end' <<<"$prov_json" 2>/dev/null || true)"
-    payload="$(jq -cn --arg u "$target" --arg m "$mode" --arg t "$title" --arg h "$hdr_arg" \
-      '["loadfile", $u, $m, -1, ({"force-media-title": $t} + (if $h != "" then {"http-header-fields": $h} else {} end))]')"
+  if [[ -n "$prov_url" ]]; then
+    local hdr_arg="" force_title=""
+    hdr_arg="$(format_mpv_header_fields <<<"$prov_json")"
+    if [[ -n "$title" && "$title" != "$id" ]]; then
+      force_title="$title"
+    fi
+    payload="$(jq -cn --arg u "$target" --arg m "$mode" --arg t "$force_title" --arg h "$hdr_arg" '
+      ((if $t != "" then {"force-media-title": $t} else {} end)
+        + (if $h != "" then {"http-header-fields": $h} else {} end)) as $opts
+      | if ($opts | length) > 0 then ["loadfile", $u, $m, -1, $opts] else ["loadfile", $u, $m] end
+    ')"
   else
     payload="$(jq -cn --arg u "$target" --arg m "$mode" '["loadfile", $u, $m]')"
   fi
@@ -1325,6 +1361,52 @@ for r in rows:
 '
 }
 
+fetch_spotify_tracks() {
+  local sp_kind="$1" sp_id="$2" url="${3:-}"
+  local sp_html parsed
+  sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "https://open.spotify.com/embed/$sp_kind/$sp_id" 2>/dev/null || true)"
+  parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
+  if [[ -z "$parsed" && -n "$url" ]]; then
+    sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "$url" 2>/dev/null || true)"
+    parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
+  fi
+  if [[ -z "$parsed" && "$sp_kind" == "track" ]]; then
+    sp_html="$(curl -sSL -m 8 "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$sp_id" 2>/dev/null || true)"
+    parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
+  fi
+  [[ -n "$parsed" ]] && printf '%s\n' "$parsed"
+}
+
+play_spotify_collection() {
+  local action="$1" sp_kind="$2" sp_id="$3" url="$4"
+  local parsed
+  parsed="$(fetch_spotify_tracks "$sp_kind" "$sp_id" "$url" || true)"
+  [[ -n "$parsed" ]] || die "Could not extract tracks from Spotify URL"
+
+  local count=0 sp_title sp_artist q match id title meta
+  while IFS=$'\t' read -r sp_title sp_artist; do
+    [[ -n "$sp_title" ]] || continue
+    q="${sp_artist:+$sp_artist }$sp_title"
+    match="$(ytm_search "$q" | head -n 1 || true)"
+    [[ -n "$match" ]] || continue
+    IFS=$'\t' read -r id title meta <<<"$match"
+    [[ -n "$id" && -n "$title" ]] || continue
+    if [[ "$action" == "play" ]] && ((count == 0)); then
+      play_track "$id" "$title" "$meta"
+    else
+      enqueue_track "$id" "$title" "$meta"
+    fi
+    ((count++))
+  done <<<"$parsed"
+
+  ((count > 0)) || die "Could not resolve any tracks from Spotify $sp_kind"
+  if [[ "$action" == "play" ]]; then
+    printf '%s[PLAY]%s Loaded %d tracks from Spotify %s\n' "$UI_GREEN" "$UI_RST" "$count" "$sp_kind"
+  else
+    printf '%s[OK]%s Queued %d tracks from Spotify %s\n' "$UI_GREEN" "$UI_RST" "$count" "$sp_kind"
+  fi
+}
+
 cmd_playlist() {
   init_storage
   local sub="${1:-ls}"
@@ -1566,17 +1648,8 @@ PY
       pl_validate_name "$name"
       [[ -n "$url" ]] || die "Usage: musicctl pl import <name> <spotify_url>"
       [[ "$url" =~ ^https?://open\.spotify\.com/(playlist|album|track)/([A-Za-z0-9]+) ]] || die "Invalid public Spotify playlist/album/track URL"
-      local sp_kind="${BASH_REMATCH[1]}" sp_id="${BASH_REMATCH[2]}" sp_html parsed
-      sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "https://open.spotify.com/embed/$sp_kind/$sp_id" 2>/dev/null || true)"
-      parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-      if [[ -z "$parsed" ]]; then
-        sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "$url" 2>/dev/null || true)"
-        parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-      fi
-      if [[ -z "$parsed" && "$sp_kind" == "track" ]]; then
-        sp_html="$(curl -sSL -m 8 "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$sp_id" 2>/dev/null || true)"
-        parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-      fi
+      local sp_kind="${BASH_REMATCH[1]}" sp_id="${BASH_REMATCH[2]}" parsed
+      parsed="$(fetch_spotify_tracks "$sp_kind" "$sp_id" "$url" || true)"
       [[ -n "$parsed" ]] || die "Could not extract tracks from Spotify URL"
       local f tmp imported=0 sp_title sp_artist q match id t m
       f="$(pl_file "$name")"
@@ -1948,11 +2021,12 @@ cmd_download() {
       prov_name="$(jq -r '.provider' <<<"$prov_json")"
       base_name="$(sanitize_filename "${artist:+$artist - }${title:-$id}")"
       [[ -n "$base_name" ]] || base_name="$id"
-      if [[ "$eff_q" == "small" && "$codec" == "flac" ]]; then
+      if [[ "$eff_q" == "small" ]] && [[ "$codec" == "flac" || "$codec" == "alac" || "$codec" == "wav" || "$codec" == pcm* ]]; then
+        local orig_codec="$codec"
         ext="m4a"
         out_tmp="$(mktemp "$MUSICCTL_DOWNLOAD_DIR/.out.XXXXXX.$ext")"
         if transcode_small_audio "$raw_tmp" "$out_tmp" "${title:-$id}" "$artist" "" "$cover_file"; then
-          codec="aac (from flac)"
+          codec="aac (from $orig_codec)"
         else
           rm -f "$out_tmp"
           out_tmp=""
@@ -2854,6 +2928,12 @@ main() {
     _ascii_bar)
       ascii_bar "$@"
       ;;
+    _format_mpv_headers)
+      format_mpv_header_fields
+      ;;
+    _probe_provider_stream)
+      probe_provider_stream "$@"
+      ;;
     _resolve_play_target)
       resolve_play_target "${1:-}"
       ;;
@@ -2916,20 +2996,28 @@ main() {
     play)
       require_deps
       (($# > 0)) || die "Usage: musicctl play <query|id|url|file>"
-      local resolved id title meta
-      resolved="$(resolve_input "$*")" || die "No results found for: $*"
-      IFS=$'\t' read -r id title meta <<<"$resolved"
-      play_track "$id" "$title" "$meta"
-      printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      if [[ "$*" =~ ^https?://open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+) ]]; then
+        play_spotify_collection "play" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$*"
+      else
+        local resolved id title meta
+        resolved="$(resolve_input "$*")" || die "No results found for: $*"
+        IFS=$'\t' read -r id title meta <<<"$resolved"
+        play_track "$id" "$title" "$meta"
+        printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      fi
       ;;
     add)
       require_deps
       (($# > 0)) || die "Usage: musicctl add <query|id|url|file>"
-      local resolved id title meta
-      resolved="$(resolve_input "$*")" || die "No results found for: $*"
-      IFS=$'\t' read -r id title meta <<<"$resolved"
-      enqueue_track "$id" "$title" "$meta"
-      printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      if [[ "$*" =~ ^https?://open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+) ]]; then
+        play_spotify_collection "add" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$*"
+      else
+        local resolved id title meta
+        resolved="$(resolve_input "$*")" || die "No results found for: $*"
+        IFS=$'\t' read -r id title meta <<<"$resolved"
+        enqueue_track "$id" "$title" "$meta"
+        printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+      fi
       ;;
     radio)
       require_deps
