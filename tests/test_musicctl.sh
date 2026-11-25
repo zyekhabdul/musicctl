@@ -164,6 +164,12 @@ mkdir -p "$MUSICCTL_DOWNLOAD_DIR"
 : >"$MUSICCTL_DOWNLOAD_DIR/Sample - Track [abc12345678].opus"
 LOCAL_OUT="$("$BIN" local)"
 assert_contains "local lists opus track" "$LOCAL_OUT" "Sample - Track [abc12345678].opus"
+mkdir -p "$MUSICCTL_DOWNLOAD_DIR/Artist/Album/Disc1" "$MUSICCTL_DOWNLOAD_DIR/.secret"
+: >"$MUSICCTL_DOWNLOAD_DIR/Artist/Album/Disc1/depth4.webm"
+: >"$MUSICCTL_DOWNLOAD_DIR/.secret/hidden.flac"
+LOCAL_VIEW="$("$BIN" _view local)"
+assert_contains "_view local matches depth-4 webm like library.py" "$LOCAL_VIEW" "depth4.webm"
+assert_ok "_view local skips hidden dirs like library.py" bash -c '! grep -qF "hidden.flac" <<<"$1"' _ "$LOCAL_VIEW"
 
 # 8. Isolated live mpv daemon lifecycle & playback modes (--ao=null)
 VOL_OUT="$("$BIN" vol 65)"
@@ -727,16 +733,20 @@ DL_DRY="$("$BIN" dl --quality cd --dry-run --force "dQw4w9WgXcQ")"
 assert_contains "dl --dry-run reports planned path" "$DL_DRY" "[DRY-RUN]"
 assert_ok "dl --dry-run does not create audio file" test ! -e "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
 
-# Test sync pl:<name> --prune --jobs 2
+# Test sync pl:<name> --prune --jobs 2 (scoped manifest prune preserves unrelated library files)
 mkdir -p "$MUSICCTL_DATA_DIR/playlists"
-rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/* "$MUSICCTL_DATA_DIR/download-archive.tsv"
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/* "$MUSICCTL_DATA_DIR/download-archive.tsv" "$MUSICCTL_DATA_DIR/sync-state.json"
 printf 'trkA1111111\tSong Alpha\tArtist A • Album A • 0:01\ntrkB2222222\tSong Beta\tArtist B • Album B • 0:01\n' >"$MUSICCTL_DATA_DIR/playlists/wpsync.tsv"
-printf 'stale audio\n' >"$MUSICCTL_DOWNLOAD_DIR/stale_track.flac"
-SYNC_OUT="$("$BIN" dl --quality cd --jobs 2 sync pl:wpsync --prune)"
-assert_contains "dl sync prints summary with pruned count" "$SYNC_OUT" "1 pruned"
-assert_ok "dl sync removes stale audio on --prune" test ! -e "$MUSICCTL_DOWNLOAD_DIR/stale_track.flac"
+printf 'unrelated audio\n' >"$MUSICCTL_DOWNLOAD_DIR/unrelated_library.flac"
+"$BIN" dl --quality cd --jobs 2 sync pl:wpsync >/dev/null
 assert_ok "dl sync fetches track 1 with default template" test -s "$MUSICCTL_DOWNLOAD_DIR/Artist A/Album A/Song Alpha.flac"
 assert_ok "dl sync fetches track 2 with default template" test -s "$MUSICCTL_DOWNLOAD_DIR/Artist B/Album B/Song Beta.flac"
+printf 'trkA1111111\tSong Alpha\tArtist A • Album A • 0:01\n' >"$MUSICCTL_DATA_DIR/playlists/wpsync.tsv"
+SYNC_OUT="$("$BIN" dl --quality cd --jobs 2 sync pl:wpsync --prune)"
+assert_contains "dl sync prints summary with pruned count" "$SYNC_OUT" "1 pruned"
+assert_ok "dl sync prunes removed playlist track" test ! -e "$MUSICCTL_DOWNLOAD_DIR/Artist B/Album B/Song Beta.flac"
+assert_ok "dl sync keeps retained playlist track" test -s "$MUSICCTL_DOWNLOAD_DIR/Artist A/Album A/Song Alpha.flac"
+assert_ok "dl sync --prune preserves unrelated library file" test -s "$MUSICCTL_DOWNLOAD_DIR/unrelated_library.flac"
 unset MUSICCTL_PROVIDERS_DIR
 
 # 13m. WP2E: Local Library Indexer & Artist/Album Grouping
@@ -880,6 +890,15 @@ printf '%s\tGap Song 1\tArtist G\n%s\tGap Song 2\tArtist G\n' "$WAV_FILE" "$WAV_
 "$BIN" add "pl:gappl" >/dev/null
 Q_GAPPL="$("$BIN" queue | sed -E $'s/\x1b\\[[0-9;]*m//g')"
 assert_contains "play+add pl:gappl queues 4 items" "$Q_GAPPL" "4. "
+"$BIN" stop >/dev/null
+
+# BUG-1 regression: _play_line routes catalog refs and _add_line routes pl:<name>
+MUSICCTL_PROVIDERS_DIR="$PROV_STREAM" "$BIN" _play_line $'ytm:song:dQw4w9WgXcQ\tSong\tArtist\t[YTM]' >/dev/null
+BUG1_STAT="$("$BIN" status --json)"
+assert_ok "_play_line routes catalog ref through provider to mpv" jq -e '.state == "playing" and .codec == "pcm_s16le"' <<<"$BUG1_STAT" >/dev/null
+"$BIN" _add_line $'pl:gappl\tgappl\t2 tracks\t[PL]' >/dev/null
+Q_BUG1="$("$BIN" queue | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+assert_contains "_add_line pl:gappl appends playlist tracks" "$Q_BUG1" "3. "
 "$BIN" stop >/dev/null
 
 PROV_STRM_DIR="$TMP_DIR/prov-stream-src"
