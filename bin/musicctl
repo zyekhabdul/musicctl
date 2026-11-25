@@ -657,6 +657,20 @@ play_catalog_track() {
   fi
 }
 
+has_providers() {
+  [[ -d "$MUSICCTL_PROVIDERS_DIR" ]] || return 1
+  local p
+  shopt -s nullglob
+  for p in "$MUSICCTL_PROVIDERS_DIR"/*; do
+    if [[ ! -d "$p" && -x "$p" ]]; then
+      shopt -u nullglob
+      return 0
+    fi
+  done
+  shopt -u nullglob
+  return 1
+}
+
 play_catalog_ref() {
   local action="$1" ref="$2"
   local ref_json src etype eid
@@ -691,19 +705,76 @@ play_catalog_ref() {
     return 0
   fi
 
-  local count=0 item_json item_act
-  while IFS= read -r item_json; do
-    [[ -n "$item_json" ]] || continue
-    item_act="add"
-    if [[ "$action" == "play" ]] && ((count == 0)); then
-      item_act="play"
+  local use_prov=0
+  has_providers && use_prov=1
+
+  local count=0 batch_jsonl="" hist_rows="" first_title="" first_meta=""
+  local t_src t_eid t_title t_artist t_album t_isrc t_track_num t_year t_dur
+  while IFS=$'\x1f' read -r t_src t_eid t_title t_artist t_album t_isrc t_track_num t_year t_dur; do
+    [[ -n "$t_eid" ]] || continue
+    local dur_lbl="" meta="" target="" hdrs_json="{}" hid=""
+    ((t_dur > 0)) 2>/dev/null && dur_lbl="$(format_mmss "$t_dur")"
+    [[ -n "$t_artist" ]] && meta="$t_artist"
+    [[ -n "$t_album" ]] && meta="${meta:+$meta • }$t_album"
+    [[ -n "$dur_lbl" ]] && meta="${meta:+$meta • }$dur_lbl"
+    [[ -n "$meta" ]] || meta="$t_src"
+
+    if [[ "$t_src" == "ytm" ]]; then
+      hid="$t_eid"
+      if target="$(find_cached_audio "$t_eid" 2>/dev/null)"; then
+        :
+      elif ((use_prov == 1)); then
+        local prov_json=""
+        if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$t_eid" "$t_title" "$t_artist" "$t_album" "$t_dur" "$t_isrc" "$t_track_num" "$t_year" "$t_src" 2>/dev/null)"; then
+          target="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
+          hdrs_json="$(jq -c '.headers // {}' <<<"$prov_json" 2>/dev/null || echo "{}")"
+        fi
+      fi
+      [[ -n "$target" ]] || target="$(id_to_url "$t_eid")"
+    else
+      if ((use_prov == 1)); then
+        local prov_json=""
+        if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$t_eid" "$t_title" "$t_artist" "$t_album" "$t_dur" "$t_isrc" "$t_track_num" "$t_year" "$t_src" 2>/dev/null)"; then
+          target="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
+          hdrs_json="$(jq -c '.headers // {}' <<<"$prov_json" 2>/dev/null || echo "{}")"
+          [[ -n "$target" ]] && hid="${t_src}:song:${t_eid}"
+        fi
+      fi
+      if [[ -z "$target" ]]; then
+        local q match yid _yt _ym
+        q="${t_artist:+$t_artist }$t_title"
+        match="$(ytm_search "$q" | head -n 1 || true)"
+        [[ -n "$match" ]] || continue
+        IFS=$'\t' read -r yid _yt _ym <<<"$match"
+        [[ -n "$yid" ]] || continue
+        hid="$yid"
+        target="$(resolve_play_target "$yid")"
+      fi
     fi
-    if play_catalog_track "$item_act" "$item_json"; then
-      ((count++))
+
+    [[ -n "$target" ]] || continue
+    batch_jsonl+="$(jq -cn --arg u "$target" --arg t "$t_title" --argjson h "${hdrs_json:-{}}" '{url:$u,title:$t,headers:$h}')"$'\n'
+    hist_rows+="${hid}"$'\x1f'"${t_title}"$'\x1f'"${meta}"$'\n'
+    if ((count == 0)); then
+      first_title="$t_title"
+      first_meta="$meta"
     fi
-  done < <(jq -c '.items[] | select(.type == "song")' <<<"$bjson")
+    ((count++))
+  done < <(jq -r '.items[] | select(.type == "song") | [.source, .id, (.title // ""), (.artist // ""), (.album // ""), (.isrc // ""), (.track_num // 0), (.year // 0), (.duration // 0)] | map(tostring) | join("\u001f")' <<<"$bjson")
 
   ((count > 0)) || die "No playable tracks found in $ref"
+  ensure_daemon
+  printf '%s' "$batch_jsonl" | run_common_py mpv-load-batch "$MUSICCTL_SOCKET" "$action" >/dev/null || die "Failed to load tracks from $ref"
+
+  local h_id h_t h_m
+  while IFS=$'\x1f' read -r h_id h_t h_m; do
+    [[ -n "$h_id" ]] || continue
+    record_history "$h_id" "$h_t" "$h_m"
+    cache_audio_bg "$h_id"
+  done <<<"$hist_rows"
+  if [[ "$action" == "play" ]]; then
+    notify_track "$first_title" "$first_meta"
+  fi
   if [[ "$action" == "play" ]]; then
     printf '%s[PLAY]%s Loaded %d tracks from %s\n' "$UI_GREEN" "$UI_RST" "$count" "${btitle:-$ref}"
   else
@@ -1753,115 +1824,11 @@ pl_file() {
 }
 
 parse_spotify_html() {
-  python3 -c '
-import html
-import json
-import re
-import sys
-
-raw = sys.stdin.read()
-if not raw.strip():
-    sys.exit(0)
-
-rows = []
-seen = set()
-
-def add_row(title, artist):
-    t = html.unescape(re.sub(r"[\t\r\n]+", " ", str(title or ""))).strip()
-    a = html.unescape(re.sub(r"[\t\r\n]+", " ", str(artist or ""))).strip()
-    if not t:
-        return
-    key = (t.lower(), a.lower())
-    if key not in seen:
-        seen.add(key)
-        rows.append(f"{t}\t{a}")
-
-m_next = re.search(r"<script[^>]*id=[\"'\'']__NEXT_DATA__[\"'\''][^>]*>(.*?)</script>", raw, re.S | re.I)
-if m_next:
-    try:
-        nd = json.loads(m_next.group(1))
-        def walk(obj):
-            if isinstance(obj, dict):
-                tl = obj.get("trackList")
-                if isinstance(tl, list):
-                    for item in tl:
-                        if isinstance(item, dict):
-                            t = item.get("title") or item.get("name")
-                            a = item.get("subtitle") or ""
-                            if not a and isinstance(item.get("artists"), list):
-                                a = ", ".join(x.get("name", "") for x in item["artists"] if isinstance(x, dict) and x.get("name"))
-                            add_row(t, a)
-                if obj.get("type") == "track" and obj.get("name"):
-                    a = ""
-                    if isinstance(obj.get("artists"), list):
-                        a = ", ".join(x.get("name", "") for x in obj["artists"] if isinstance(x, dict) and x.get("name"))
-                    add_row(obj.get("name"), a)
-                for v in obj.values():
-                    walk(v)
-            elif isinstance(obj, list):
-                for v in obj:
-                    walk(v)
-        walk(nd)
-    except Exception:
-        pass
-
-if not rows and raw.lstrip().startswith("{"):
-    try:
-        oem = json.loads(raw)
-        t = str(oem.get("title") or "").strip()
-        if t:
-            add_row(t, "")
-    except Exception:
-        pass
-
-if not rows:
-    og_t = ""
-    og_d = ""
-    for pat in (
-        r"<meta[^>]+property=[\"'\'']og:title[\"'\''][^>]+content=[\"'\'']([^\"'\'']+)[\"'\'']",
-        r"<meta[^>]+content=[\"'\'']([^\"'\'']+)[\"'\''][^>]+property=[\"'\'']og:title[\"'\'']",
-    ):
-        m = re.search(pat, raw, re.I)
-        if m:
-            og_t = html.unescape(m.group(1)).strip()
-            break
-    for pat in (
-        r"<meta[^>]+property=[\"'\'']og:description[\"'\''][^>]+content=[\"'\'']([^\"'\'']+)[\"'\'']",
-        r"<meta[^>]+content=[\"'\'']([^\"'\'']+)[\"'\''][^>]+property=[\"'\'']og:description[\"'\'']",
-    ):
-        m = re.search(pat, raw, re.I)
-        if m:
-            og_d = html.unescape(m.group(1)).strip()
-            break
-    if og_t:
-        og_t = re.sub(r"\s*[-|]\s*song and lyrics by .*$", "", og_t, flags=re.I).strip()
-        artist = ""
-        if og_d:
-            cleaned = re.sub(r"^Listen to .*? on Spotify\.\s*", "", og_d, flags=re.I)
-            parts = [p.strip() for p in re.split(r"[·•]", cleaned) if p.strip()]
-            if parts and not re.match(r"^(Song|Album|Playlist|\d{4})$", parts[0], re.I):
-                artist = parts[0]
-        add_row(og_t, artist)
-
-for r in rows:
-    print(r)
-'
+  run_common_py parse-spotify-html
 }
 
 fetch_spotify_tracks() {
-  local sp_kind="$1" sp_id="$2" url="${3:-}"
-  local sp_html parsed
-  sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "https://open.spotify.com/embed/$sp_kind/$sp_id" 2>/dev/null || true)"
-  parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-  if [[ -z "$parsed" && -n "$url" ]]; then
-    sp_html="$(curl -sSL -m 10 -H 'User-Agent: Mozilla/5.0' "$url" 2>/dev/null || true)"
-    parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-  fi
-  if [[ -z "$parsed" && "$sp_kind" == "track" ]]; then
-    sp_html="$(curl -sSL -m 8 "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$sp_id" 2>/dev/null || true)"
-    parsed="$(printf '%s' "$sp_html" | parse_spotify_html || true)"
-  fi
-  [[ -n "$parsed" ]] && printf '%s\n' "$parsed"
+  run_common_py fetch-spotify-tracks "$1" "$2" "${3:-}"
 }
 
 play_spotify_collection() {
@@ -2299,7 +2266,7 @@ cmd_lyrics() {
     shift
   fi
 
-  local query="$*" title="" artist="" duration="0" raw=""
+  local query="$*" title="" artist="" duration="0" res_json=""
   if [[ -z "${query// }" ]]; then
     daemon_alive || die "Usage: musicctl lyrics [--live] [query] (or start playback first)"
     local idle uploader
@@ -2311,65 +2278,22 @@ cmd_lyrics() {
     duration="$(mpv_get "duration" || echo "0")"
     [[ -n "$title" ]] || die "Cannot determine current track title"
     title="$(clean_track_title "$title")"
-
     artist="$(run_common_py primary-artist "$artist" "$uploader")"
-
-    if [[ -n "$artist" ]]; then
-      local dur_int="${duration%.*}" get_resp=""
-      [[ "$dur_int" =~ ^[0-9]+$ ]] || dur_int=0
-      if ((dur_int > 0)); then
-        get_resp="$(curl -sS -m 8 --get 'https://lrclib.net/api/get' --data-urlencode "track_name=$title" --data-urlencode "artist_name=$artist" --data-urlencode "duration=$dur_int" 2>/dev/null || true)"
-      else
-        get_resp="$(curl -sS -m 8 --get 'https://lrclib.net/api/get' --data-urlencode "track_name=$title" --data-urlencode "artist_name=$artist" 2>/dev/null || true)"
-      fi
-      if [[ -n "$get_resp" ]] && jq -e 'type == "object" and (.syncedLyrics != null or .plainLyrics != null)' <<<"$get_resp" >/dev/null 2>&1; then
-        raw="[$get_resp]"
-      else
-        raw="$(curl -sS -m 8 --get 'https://lrclib.net/api/search' --data-urlencode "track_name=$title" --data-urlencode "artist_name=$artist" 2>/dev/null || true)"
-      fi
-      query="$artist $title"
-    else
-      query="$title"
-    fi
   fi
 
-  if [[ -z "$raw" || "$raw" == "[]" ]]; then
-    raw="$(curl -sS -m 8 --get 'https://lrclib.net/api/search' --data-urlencode "q=$query" 2>/dev/null || true)"
-  fi
+  res_json="$(run_common_py fetch-lyrics "$title" "$artist" "$duration" "$query" --json 2>/dev/null || true)"
+  [[ -n "$res_json" ]] || die "No lyrics found for: ${query:-$title}"
 
-  if [[ -n "$raw" && "$raw" != "[]" && -n "$title" && -n "$artist" ]]; then
-    raw="$(printf '%s' "$raw" | run_common_py pick-lyrics "$title" "$artist" "$duration" 2>/dev/null || printf '[]')"
-  fi
-
-  if ((live_mode == 1)) && daemon_alive && [[ -n "$raw" && "$raw" != "[]" ]]; then
+  if ((live_mode == 1)) && daemon_alive; then
     local synced_json
-    if synced_json="$(printf '%s' "$raw" | parse_synced_lyrics_json 2>/dev/null)"; then
+    synced_json="$(jq -c '.synced_json // empty' <<<"$res_json" 2>/dev/null || true)"
+    if [[ -n "$synced_json" ]]; then
       live_lyrics_watch "$synced_json"
       return 0
     fi
   fi
 
-  if [[ -n "$raw" && "$raw" != "[]" ]] && printf '%s' "$raw" | parse_lyrics_json 2>/dev/null; then
-    return 0
-  fi
-
-  if [[ -z "$artist" && "$query" == *" - "* ]]; then
-    artist="${query%% - *}"
-    title="${query#* - }"
-  fi
-  if [[ -n "$artist" && -n "$title" ]]; then
-    local enc_a enc_t fb_raw
-    enc_a="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$artist" 2>/dev/null || true)"
-    enc_t="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$title" 2>/dev/null || true)"
-    if [[ -n "$enc_a" && -n "$enc_t" ]]; then
-      fb_raw="$(curl -sS -m 3 "https://api.lyrics.ovh/v1/${enc_a}/${enc_t}" 2>/dev/null || true)"
-      if [[ -n "$fb_raw" ]] && printf '%s' "$fb_raw" | parse_fallback_lyrics_json "$title" "$artist" 2>/dev/null; then
-        return 0
-      fi
-    fi
-  fi
-
-  die "No lyrics found for: $query"
+  jq -r '.plain' <<<"$res_json"
 }
 
 # ------------------------------------------------------------------------------
@@ -2498,8 +2422,9 @@ cmd_download() {
 
 list_local_files() {
   [[ -d "$MUSICCTL_DOWNLOAD_DIR" ]] || return 0
-  find "$MUSICCTL_DOWNLOAD_DIR" -maxdepth 3 -type f \
-    \( -iname '*.opus' -o -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.ogg' -o -iname '*.wav' \) \
+  find "$MUSICCTL_DOWNLOAD_DIR" -mindepth 1 -maxdepth 4 \
+    \( -name '.*' -prune \) -o \
+    -type f \( -iname '*.opus' -o -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.flac' -o -iname '*.ogg' -o -iname '*.wav' -o -iname '*.webm' \) -print \
     | sort
 }
 
@@ -2592,49 +2517,12 @@ save_session() {
 cmd_resume() {
   init_storage
   [[ -s "$SESSION_FILE" ]] || die "No saved session found ($SESSION_FILE)"
-  local count pos tpos vol muted loop_mode speed_v
+  local count
   count="$(jq '.playlist | length' "$SESSION_FILE" 2>/dev/null || echo 0)"
   ((count > 0)) || die "Saved session playlist is empty"
 
-  pos="$(jq -r '.playlist_pos // 0' "$SESSION_FILE")"
-  tpos="$(jq -r '.time_pos // 0' "$SESSION_FILE")"
-  vol="$(jq -r '.volume // 100' "$SESSION_FILE")"
-  muted="$(jq -r '.muted // false' "$SESSION_FILE")"
-  loop_mode="$(jq -r '.loop // "off"' "$SESSION_FILE")"
-  speed_v="$(jq -r '.speed // 1' "$SESSION_FILE")"
-
   ensure_daemon
-  local first=1 item payload
-  while IFS= read -r item; do
-    [[ -n "$item" ]] || continue
-    if ((first == 1)); then
-      payload="$(jq -cn --arg u "$item" '["loadfile", $u, "replace"]')"
-      first=0
-    else
-      payload="$(jq -cn --arg u "$item" '["loadfile", $u, "append"]')"
-    fi
-    mpv_cmd "$payload" >/dev/null || true
-  done < <(jq -r '.playlist[]' "$SESSION_FILE")
-
-  mpv_cmd "$(jq -cn --argjson i "$pos" '["set_property", "playlist-pos", $i]')" >/dev/null 2>&1 || true
-  mpv_cmd "$(jq -cn --argjson v "$vol" '["set_property", "volume", $v]')" >/dev/null 2>&1 || true
-  mpv_cmd "$(jq -cn --argjson m "$muted" '["set_property", "mute", $m]')" >/dev/null 2>&1 || true
-  mpv_cmd "$(jq -cn --argjson s "$speed_v" '["set_property", "speed", $s]')" >/dev/null 2>&1 || true
-  case "$loop_mode" in
-    one) cmd_loop one >/dev/null ;;
-    all) cmd_loop all >/dev/null ;;
-    *)   cmd_loop off >/dev/null ;;
-  esac
-
-  if python3 - "$tpos" <<'PY' >/dev/null 2>&1; then
-import sys
-sys.exit(0 if float(sys.argv[1]) > 1.0 else 1)
-PY
-    sleep 0.25
-    mpv_cmd "$(jq -cn --argjson t "$tpos" '["seek", $t, "absolute"]')" >/dev/null 2>&1 || true
-  fi
-
-  mpv_cmd '["set_property", "pause", false]' >/dev/null 2>&1 || true
+  count="$(run_common_py mpv-resume "$MUSICCTL_SOCKET" "$SESSION_FILE")" || die "Failed to resume saved session"
   printf '%s[PLAY]%s Resumed session (%s tracks)\n' "$UI_GREEN" "$UI_RST" "$count"
 }
 
@@ -3005,6 +2893,14 @@ cmd_internal_play_line() {
     return 0
   fi
   [[ -n "$id" ]] || return 0
+  if [[ "$id" == pl:* ]]; then
+    cmd_play_or_add "play" "$id"
+    return 0
+  fi
+  if [[ ! -f "$id" && ! "$id" =~ ^[A-Za-z0-9_-]{11}$ && "$id" != http://* && "$id" != https://* && "$id" != file://* ]] && run_catalog_py parse-ref "$id" >/dev/null 2>&1; then
+    play_catalog_ref "play" "$id"
+    return 0
+  fi
   play_track "$id" "$title" "$meta"
 }
 
@@ -3013,6 +2909,14 @@ cmd_internal_add_line() {
   local id title meta _tag
   IFS=$'\t' read -r id title meta _tag <<<"$line"
   [[ -n "$id" ]] || return 0
+  if [[ "$id" == pl:* ]]; then
+    cmd_play_or_add "add" "$id"
+    return 0
+  fi
+  if [[ ! -f "$id" && ! "$id" =~ ^[A-Za-z0-9_-]{11}$ && "$id" != http://* && "$id" != https://* && "$id" != file://* ]] && run_catalog_py parse-ref "$id" >/dev/null 2>&1; then
+    play_catalog_ref "add" "$id"
+    return 0
+  fi
   enqueue_track "$id" "$title" "$meta"
 }
 

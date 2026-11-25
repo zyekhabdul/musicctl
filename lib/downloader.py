@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import html
 import json
 import os
 import re
@@ -37,109 +36,11 @@ BAD_PATH_CHARS_RE = re.compile(r'[/\\\x00:*?"<>|\t\r\n]+')
 SPOTIFY_URL_RE = re.compile(r"^https?://open\.spotify\.com/(track|album|playlist)/([A-Za-z0-9]+)", re.I)
 
 
-def parse_spotify_html(raw_html: str) -> list[tuple[str, str]]:
-    """Extract deduplicated (title, artist) pairs from Spotify embed/HTML/oEmbed payloads."""
-    raw = (raw_html or "").strip()
-    if not raw:
-        return []
-    rows: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    def add_row(title: Any, artist: Any) -> None:
-        t = html.unescape(re.sub(r"[\t\r\n]+", " ", str(title or ""))).strip()
-        a = html.unescape(re.sub(r"[\t\r\n]+", " ", str(artist or ""))).strip()
-        if not t:
-            return
-        k = (t.lower(), a.lower())
-        if k not in seen:
-            seen.add(k)
-            rows.append((t, a))
-
-    m_next = re.search(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>(.*?)</script>", raw, re.S | re.I)
-    if m_next:
-        try:
-            nd = json.loads(m_next.group(1))
-
-            def walk(obj: Any) -> None:
-                if isinstance(obj, dict):
-                    tl = obj.get("trackList")
-                    if isinstance(tl, list):
-                        for item in tl:
-                            if isinstance(item, dict):
-                                add_row(item.get("title") or item.get("name"), item.get("subtitle") or "")
-                    trks = obj.get("tracks")
-                    if isinstance(trks, dict) and isinstance(trks.get("items"), list):
-                        for it in trks["items"]:
-                            if not isinstance(it, dict):
-                                continue
-                            tr = it.get("track") if isinstance(it.get("track"), dict) else it
-                            if isinstance(tr, dict):
-                                arts = ", ".join(str(x.get("name") or "") for x in (tr.get("artists") or []) if isinstance(x, dict))
-                                add_row(tr.get("name"), arts)
-                    for v in obj.values():
-                        walk(v)
-                elif isinstance(obj, list):
-                    for v in obj:
-                        walk(v)
-
-            walk(nd)
-        except Exception:
-            pass
-    if rows:
-        return rows
-
-    if raw.lstrip().startswith("{"):
-        try:
-            oe = json.loads(raw)
-            if isinstance(oe, dict) and oe.get("title"):
-                add_row(oe.get("title"), oe.get("author_name") or "")
-                return rows
-        except Exception:
-            pass
-
-    og_title = ""
-    og_desc = ""
-    for pat in (
-        r"<meta[^>]*property=[\"']og:title[\"'][^>]*content=[\"']([^\"']+)[\"']",
-        r"<meta[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:title[\"']",
-    ):
-        m = re.search(pat, raw, re.I)
-        if m:
-            og_title = html.unescape(m.group(1))
-            break
-    for pat in (
-        r"<meta[^>]*property=[\"']og:description[\"'][^>]*content=[\"']([^\"']+)[\"']",
-        r"<meta[^>]*content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:description[\"']",
-    ):
-        m = re.search(pat, raw, re.I)
-        if m:
-            og_desc = html.unescape(m.group(1))
-            break
-    if og_title:
-        title = re.sub(r"\s*\|\s*Spotify\s*$", "", og_title).strip()
-        artist = ""
-        m_art = re.match(r"^(.*?)\s*[·•|-]\s*Song\b", og_desc, re.I)
-        if m_art:
-            artist = m_art.group(1).strip()
-        add_row(title, artist)
-    return rows
+parse_spotify_html = common.parse_spotify_html
 
 
 def _fetch_spotify_tracks(kind: str, sp_id: str, url: str) -> list[dict[str, Any]]:
-    urls = [f"https://open.spotify.com/embed/{kind}/{sp_id}", url]
-    if kind == "track":
-        urls.append("https://open.spotify.com/oembed?" + urllib.parse.urlencode({"url": f"https://open.spotify.com/track/{sp_id}"}))
-    parsed: list[tuple[str, str]] = []
-    for target_u in urls:
-        try:
-            req = urllib.request.Request(target_u, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            parsed = parse_spotify_html(raw)
-            if parsed:
-                break
-        except Exception:
-            continue
+    parsed = common.fetch_spotify_tracks(kind, sp_id, url)
     return [
         catalog.make_entity(source="spotify", id=f"sp-{sp_id}-{idx}", type="song", title=t, artist=a)
         for idx, (t, a) in enumerate(parsed, start=1)
@@ -338,65 +239,10 @@ def prepare_square_cover(
 
 
 def _default_lyrics_fetcher(title: str, artist: str, duration: float) -> str:
-    clean_title = common.normalize_track_title(title)
-    headers = {"User-Agent": "musicctl/2.2"}
-    chosen: dict[str, Any] | None = None
-
-    if artist:
-        params: dict[str, str] = {"track_name": clean_title, "artist_name": artist}
-        if duration > 0:
-            params["duration"] = str(int(round(duration)))
-        try:
-            req = urllib.request.Request(
-                "https://lrclib.net/api/get?" + urllib.parse.urlencode(params),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                obj = json.loads(resp.read().decode("utf-8", errors="replace"))
-            if isinstance(obj, dict) and (obj.get("syncedLyrics") or obj.get("plainLyrics")):
-                chosen = obj
-        except Exception:
-            chosen = None
-
-    if chosen is None:
-        q_str = f"{artist} {clean_title}".strip() if artist else clean_title
-        try:
-            req = urllib.request.Request(
-                "https://lrclib.net/api/search?" + urllib.parse.urlencode({"q": q_str}),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
-                items = json.loads(resp.read().decode("utf-8", errors="replace"))
-            if isinstance(items, list):
-                chosen = common.pick_best_lyrics_candidate(items, clean_title, artist, duration)
-        except Exception:
-            chosen = None
-
-    if chosen:
-        synced = str(chosen.get("syncedLyrics") or "").strip()
-        if synced:
-            return synced
-        plain = str(chosen.get("plainLyrics") or "").strip()
-        if plain:
-            return plain
-
-    if artist and clean_title:
-        try:
-            url = (
-                "https://api.lyrics.ovh/v1/"
-                + urllib.parse.quote(artist)
-                + "/"
-                + urllib.parse.quote(clean_title)
-            )
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                fb_raw = resp.read().decode("utf-8", errors="replace")
-            fb_res = common.parse_fallback_lyrics_json(fb_raw, clean_title, artist)
-            if fb_res is not None:
-                return "\n".join(txt for _, txt in fb_res[1])
-        except Exception:
-            pass
-    return ""
+    res = common.fetch_lyrics(title, artist=artist, duration=duration)
+    if not res:
+        return ""
+    return str(res.get("synced_text") or res.get("plain_text") or "")
 
 
 def fetch_and_write_lrc(
@@ -786,6 +632,47 @@ def _jobs_file(data_dir: Path) -> Path:
     return data_dir / "dl-jobs.json"
 
 
+def _sync_state_file(data_dir: Path) -> Path:
+    return data_dir / "sync-state.json"
+
+
+def _sync_source_key(targets: list[str]) -> str:
+    return " ".join(targets).strip()
+
+
+def load_sync_state(data_dir: Path) -> dict[str, list[str]]:
+    """Load per-source sync ownership manifest {source_key: [dest_path, ...]}."""
+    sf = _sync_state_file(data_dir)
+    if not sf.is_file():
+        return {}
+    try:
+        raw = json.loads(sf.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, list):
+            out[k] = [str(p) for p in v if isinstance(p, str) and p.strip()]
+    return out
+
+
+def save_sync_state(data_dir: Path, lock: threading.Lock, state: dict[str, list[str]]) -> None:
+    """Persist per-source sync ownership manifest atomically."""
+    with lock:
+        sf = _sync_state_file(data_dir)
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".sync-state.", suffix=".tmp", dir=str(sf.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp_name, sf)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+
 def _load_jobs(data_dir: Path) -> list[dict[str, Any]]:
     jf = _jobs_file(data_dir)
     if not jf.is_file():
@@ -1083,7 +970,7 @@ def run_download(argv: list[str] | None = None) -> int:
         print(f"[ERR] {exc}", file=sys.stderr)
         return 1
 
-    if not tracks:
+    if not tracks and not sync_mode:
         print("[ERR] No tracks resolved for download", file=sys.stderr)
         return 1
 
@@ -1165,15 +1052,36 @@ def run_download(argv: list[str] | None = None) -> int:
                 for fut in concurrent.futures.as_completed(futs):
                     fut.result()
 
-        if sync_mode and args.prune and not args.dry_run:
+        if sync_mode and not args.dry_run:
+            sync_key = _sync_source_key(targets)
+            sync_state = load_sync_state(data_dir)
+            prev_paths = {Path(p).resolve() for p in sync_state.get(sync_key, []) if p}
+            other_owned = {
+                Path(p).resolve()
+                for k, plist in sync_state.items()
+                if k != sync_key
+                for p in plist
+                if p
+            }
+            base_res = download_dir.resolve()
             pruned = 0
-            for p in list(download_dir.rglob("*")):
-                if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
-                    if p.resolve() not in expected_paths:
-                        p.unlink(missing_ok=True)
-                        p.with_suffix(".lrc").unlink(missing_ok=True)
-                        pruned += 1
-            if not args.jsonl:
+            if args.prune and not cancel_event.is_set():
+                if counts["failed"] == 0:
+                    for p in sorted(prev_paths - expected_paths - other_owned):
+                        if base_res in p.parents and p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+                            p.unlink(missing_ok=True)
+                            p.with_suffix(".lrc").unlink(missing_ok=True)
+                            pruned += 1
+                elif not args.jsonl:
+                    print(f"[WARN] Skipping prune due to {counts['failed']} failed track(s)", flush=True)
+
+            if counts["failed"] == 0 and not cancel_event.is_set():
+                sync_state[sync_key] = sorted(str(p) for p in expected_paths)
+            else:
+                sync_state[sync_key] = sorted(str(p) for p in (prev_paths | expected_paths))
+            save_sync_state(data_dir, jobs_lock, sync_state)
+
+            if args.prune and not args.jsonl:
                 print(f"[OK] Sync complete: {counts['downloaded']} fetched, {counts['skipped']} skipped, {counts['failed']} failed, {pruned} pruned")
     finally:
         if prev_sigterm is not None:

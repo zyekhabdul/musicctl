@@ -59,5 +59,5 @@ Local paths (`/path/to/file.flac` or `file://...`) are also accepted. Included O
 ## Verification & Auto-Tagging
 
 For downloads, `musicctl` verifies every file returned by a provider using `ffprobe` (real audio codec + duration within `-5s` to `+15s` of metadata duration when known).
-- If `quality=small` and the provider returns FLAC, `musicctl` transcodes locally to `128kbps` `.m4a` via `ffmpeg`.
+- If `quality=small` and the provider returns lossless audio (`FLAC`/`ALAC`/`WAV`), `musicctl` transcodes locally to `128kbps` `.opus` via `libopus` by default (or `128kbps` `.m4a` when `--format m4a` is passed).
 - Title/artist metadata and cover artwork (for `.flac`, `.m4a`, `.mp3`) are automatically embedded via `ffmpeg`.

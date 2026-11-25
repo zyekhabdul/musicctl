@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+USER_AGENT = "musicctl/2.2"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
 
@@ -278,6 +280,283 @@ def parse_fallback_lyrics_json(
     return f"{hdr} [Fallback]", [(None, ln) for ln in body.splitlines()]
 
 
+def parse_spotify_html(raw_html: str) -> list[tuple[str, str]]:
+    """Extract deduplicated (title, artist) pairs from Spotify embed/HTML/oEmbed payloads."""
+    raw = (raw_html or "").strip()
+    if not raw:
+        return []
+    rows: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_row(title: Any, artist: Any) -> None:
+        t = html.unescape(re.sub(r"[\t\r\n]+", " ", str(title or ""))).strip()
+        a = html.unescape(re.sub(r"[\t\r\n]+", " ", str(artist or ""))).strip()
+        if not t:
+            return
+        k = (t.lower(), a.lower())
+        if k not in seen:
+            seen.add(k)
+            rows.append((t, a))
+
+    m_next = re.search(r"<script[^>]*id=[\"']__NEXT_DATA__[\"'][^>]*>(.*?)</script>", raw, re.S | re.I)
+    if m_next:
+        try:
+            nd = json.loads(m_next.group(1))
+
+            def walk(obj: Any) -> None:
+                if isinstance(obj, dict):
+                    tl = obj.get("trackList")
+                    if isinstance(tl, list):
+                        for item in tl:
+                            if not isinstance(item, dict):
+                                continue
+                            t = item.get("title") or item.get("name")
+                            a = item.get("subtitle") or ""
+                            if not a and isinstance(item.get("artists"), list):
+                                a = ", ".join(
+                                    str(x.get("name") or "")
+                                    for x in item["artists"]
+                                    if isinstance(x, dict) and x.get("name")
+                                )
+                            add_row(t, a)
+                    trks = obj.get("tracks")
+                    if isinstance(trks, dict) and isinstance(trks.get("items"), list):
+                        for it in trks["items"]:
+                            if not isinstance(it, dict):
+                                continue
+                            tr = it.get("track") if isinstance(it.get("track"), dict) else it
+                            if isinstance(tr, dict):
+                                arts = ", ".join(
+                                    str(x.get("name") or "")
+                                    for x in (tr.get("artists") or [])
+                                    if isinstance(x, dict) and x.get("name")
+                                )
+                                add_row(tr.get("name"), arts)
+                    if obj.get("type") == "track" and obj.get("name"):
+                        arts = ", ".join(
+                            str(x.get("name") or "")
+                            for x in (obj.get("artists") or [])
+                            if isinstance(x, dict) and x.get("name")
+                        )
+                        add_row(obj.get("name"), arts)
+                    for v in obj.values():
+                        walk(v)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        walk(v)
+
+            walk(nd)
+        except Exception:
+            pass
+    if rows:
+        return rows
+
+    if raw.lstrip().startswith("{"):
+        try:
+            oe = json.loads(raw)
+            if isinstance(oe, dict) and oe.get("title"):
+                add_row(oe.get("title"), oe.get("author_name") or "")
+                return rows
+        except Exception:
+            pass
+
+    og_title = ""
+    og_desc = ""
+    for pat in (
+        r"<meta[^>]+property=[\"']og:title[\"'][^>]+content=[\"']([^\"']+)[\"']",
+        r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:title[\"']",
+    ):
+        m = re.search(pat, raw, re.I)
+        if m:
+            og_title = html.unescape(m.group(1)).strip()
+            break
+    for pat in (
+        r"<meta[^>]+property=[\"']og:description[\"'][^>]+content=[\"']([^\"']+)[\"']",
+        r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:description[\"']",
+    ):
+        m = re.search(pat, raw, re.I)
+        if m:
+            og_desc = html.unescape(m.group(1)).strip()
+            break
+    if og_title:
+        title = re.sub(r"\s*\|\s*Spotify\s*$", "", og_title, flags=re.I).strip()
+        title = re.sub(r"\s*[-|]\s*song and lyrics by .*$", "", title, flags=re.I).strip()
+        artist = ""
+        if og_desc:
+            cleaned = re.sub(r"^Listen to .*? on Spotify\.\s*", "", og_desc, flags=re.I)
+            m_art = re.match(r"^(.*?)\s*[·•|-]\s*Song\b", cleaned, re.I)
+            if m_art:
+                artist = m_art.group(1).strip()
+            else:
+                parts = [p.strip() for p in re.split(r"[·•]", cleaned) if p.strip()]
+                if parts and not re.match(r"^(Song|Album|Playlist|\d{4})$", parts[0], re.I):
+                    artist = parts[0]
+        add_row(title, artist)
+    return rows
+
+
+def fetch_spotify_tracks(
+    kind: str,
+    sp_id: str,
+    url: str = "",
+    timeout: float = 8.0,
+) -> list[tuple[str, str]]:
+    """Fetch (title, artist) pairs from public Spotify embed, page URL, or oEmbed."""
+    urls = [f"https://open.spotify.com/embed/{kind}/{sp_id}"]
+    if url:
+        urls.append(url)
+    if kind == "track":
+        urls.append(
+            "https://open.spotify.com/oembed?"
+            + urllib.parse.urlencode({"url": f"https://open.spotify.com/track/{sp_id}"})
+        )
+    for target_u in urls:
+        try:
+            req = urllib.request.Request(target_u, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            parsed = parse_spotify_html(raw)
+            if parsed:
+                return parsed
+        except Exception:
+            continue
+    return []
+
+
+def fetch_lyrics(
+    title: str,
+    artist: str = "",
+    duration: float = 0.0,
+    query: str = "",
+    timeout: float = 5.0,
+) -> dict[str, Any] | None:
+    """Fetch lyrics via LRCLIB (/api/get -> /api/search) with lyrics.ovh fallback."""
+    t_in = (title or "").strip()
+    a_in = (artist or "").strip()
+    q_in = (query or "").strip()
+    if not t_in and q_in:
+        if " - " in q_in and not a_in:
+            a_part, t_part = q_in.split(" - ", 1)
+            a_in = a_part.strip()
+            t_in = t_part.strip()
+        else:
+            t_in = q_in
+
+    clean_title = normalize_track_title(t_in)
+    headers = {"User-Agent": USER_AGENT}
+    chosen: dict[str, Any] | None = None
+
+    if a_in and clean_title:
+        params: dict[str, str] = {"track_name": clean_title, "artist_name": a_in}
+        if duration > 0:
+            params["duration"] = str(int(round(duration)))
+        try:
+            req = urllib.request.Request(
+                "https://lrclib.net/api/get?" + urllib.parse.urlencode(params),
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                obj = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if isinstance(obj, dict) and (obj.get("syncedLyrics") or obj.get("plainLyrics")):
+                chosen = obj
+        except Exception:
+            chosen = None
+
+    if chosen is None and a_in and clean_title:
+        try:
+            req = urllib.request.Request(
+                "https://lrclib.net/api/search?"
+                + urllib.parse.urlencode({"track_name": clean_title, "artist_name": a_in}),
+                headers=headers,
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                items = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if isinstance(items, list):
+                chosen = pick_best_lyrics_candidate(items, clean_title, a_in, duration)
+        except Exception:
+            chosen = None
+
+    if chosen is None:
+        q_str = q_in or (f"{a_in} {clean_title}".strip() if a_in else clean_title)
+        if q_str:
+            try:
+                req = urllib.request.Request(
+                    "https://lrclib.net/api/search?" + urllib.parse.urlencode({"q": q_str}),
+                    headers=headers,
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    items = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if isinstance(items, list):
+                    chosen = pick_best_lyrics_candidate(items, clean_title or q_str, a_in, duration)
+            except Exception:
+                chosen = None
+
+    if chosen:
+        synced = str(chosen.get("syncedLyrics") or "").strip()
+        plain = str(chosen.get("plainLyrics") or "").strip()
+        if not plain and synced:
+            plain = re.sub(r"(?m)^\[[0-9]{1,2}:[0-9]{2}(?:\.[0-9]+)?\]\s*", "", synced).strip()
+        if plain or synced:
+            return {
+                "source": "lrclib",
+                "title": str(chosen.get("trackName") or clean_title or "Unknown"),
+                "artist": str(chosen.get("artistName") or a_in or "Unknown"),
+                "synced_text": synced,
+                "plain_text": plain,
+                "synced_lines": parse_synced_lyrics_lines(synced) if synced else [],
+            }
+
+    if a_in and clean_title:
+        try:
+            fb_url = (
+                "https://api.lyrics.ovh/v1/"
+                + urllib.parse.quote(a_in)
+                + "/"
+                + urllib.parse.quote(clean_title)
+            )
+            req = urllib.request.Request(fb_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=min(3.0, timeout)) as resp:
+                fb_raw = resp.read().decode("utf-8", errors="replace")
+            fb_res = parse_fallback_lyrics_json(fb_raw, clean_title, a_in)
+            if fb_res is not None:
+                return {
+                    "source": "fallback",
+                    "title": clean_title,
+                    "artist": a_in,
+                    "synced_text": "",
+                    "plain_text": "\n".join(txt for _, txt in fb_res[1]),
+                    "synced_lines": [],
+                }
+        except Exception:
+            pass
+    return None
+
+
+def format_lyrics_plain(res: dict[str, Any]) -> str:
+    """Format lyrics result dict as terminal plain-text output."""
+    t = str(res.get("title") or "Unknown")
+    a = str(res.get("artist") or "").strip()
+    hdr = f"{t} - {a}" if a else t
+    if res.get("source") == "fallback":
+        hdr = f"{hdr} [Fallback]"
+    return f"=== {hdr} ===\n\n{res.get('plain_text') or ''}"
+
+
+def format_mpv_header_fields(headers: Any) -> str:
+    """Format HTTP headers dict into escaped mpv http-header-fields string."""
+    if isinstance(headers, str):
+        return headers
+    if not isinstance(headers, dict) or not headers:
+        return ""
+    parts: list[str] = []
+    for k, v in headers.items():
+        if not k:
+            continue
+        item = f"{k}: {v}".replace("\\", "\\\\").replace(",", "\\,")
+        parts.append(item)
+    return ",".join(parts)
+
+
 def parse_sponsorblock_segments(
     raw_json: str, categories: tuple[str, ...] = ("music_offtopic",)
 ) -> list[dict[str, Any]]:
@@ -342,7 +621,7 @@ def fetch_sponsorblock_segments(video_id: str, timeout: float = 2.0) -> list[dic
         )
     )
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "musicctl/2.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         return parse_sponsorblock_segments(raw)
@@ -463,6 +742,108 @@ class MpvClient:
     def send(self, command: list[Any]) -> bool:
         ok, _ = self.raw_request(json.dumps(command), timeout=self.timeout)
         return ok
+
+    def batch_send(self, commands: list[list[Any]], timeout: float = 5.0) -> tuple[int, int]:
+        """Execute multiple mpv IPC commands over a single socket roundtrip."""
+        if not commands:
+            return 0, 0
+        if not os.path.exists(self.sock_path):
+            return 0, len(commands)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(self.sock_path)
+            payload = "".join(
+                json.dumps({"command": cmd, "request_id": idx}) + "\n"
+                for idx, cmd in enumerate(commands, 1)
+            )
+            s.sendall(payload.encode("utf-8"))
+            ok_count = 0
+            seen_ids: set[int] = set()
+            buf = b""
+            while len(seen_ids) < len(commands):
+                chunk = s.recv(8192)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    raw_line, buf = buf.split(b"\n", 1)
+                    text = raw_line.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    try:
+                        obj = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    req_id = obj.get("request_id")
+                    if isinstance(req_id, int) and 1 <= req_id <= len(commands) and req_id not in seen_ids:
+                        seen_ids.add(req_id)
+                        if obj.get("error") == "success":
+                            ok_count += 1
+            return ok_count, len(commands)
+        except OSError:
+            return 0, len(commands)
+        finally:
+            s.close()
+
+    def batch_loadfile(
+        self,
+        items: list[dict[str, Any]],
+        action: str = "play",
+        timeout: float = 5.0,
+    ) -> tuple[int, int]:
+        """Load one or more tracks into mpv in a single pipelined IPC batch."""
+        cmds: list[list[Any]] = []
+        for idx, item in enumerate(items):
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            default_mode = "replace" if (action == "play" and idx == 0) else ("append" if action == "append" else "append-play")
+            mode = str(item.get("mode") or default_mode)
+            opts: dict[str, str] = {}
+            title = str(item.get("title") or "").strip()
+            if title and title != url:
+                opts["force-media-title"] = title
+            hdr_str = format_mpv_header_fields(item.get("headers"))
+            if hdr_str:
+                opts["http-header-fields"] = hdr_str
+            if opts:
+                cmds.append(["loadfile", url, mode, -1, opts])
+            else:
+                cmds.append(["loadfile", url, mode])
+        if not cmds:
+            return 0, 0
+        if action == "play":
+            cmds.append(["set_property", "pause", False])
+        return self.batch_send(cmds, timeout=timeout)
+
+    def resume_session(self, session_data: dict[str, Any], timeout: float = 5.0) -> int:
+        """Restore saved mpv playlist, position, volume, mute, loop, and speed in one batch."""
+        playlist = [str(x) for x in (session_data.get("playlist") or []) if x]
+        if not playlist:
+            return 0
+        cmds: list[list[Any]] = [["loadfile", playlist[0], "replace"]]
+        for u in playlist[1:]:
+            cmds.append(["loadfile", u, "append"])
+        cmds.append(["set_property", "playlist-pos", int(session_data.get("playlist_pos") or 0)])
+        cmds.append(["set_property", "volume", session_data.get("volume", 100)])
+        cmds.append(["set_property", "mute", bool(session_data.get("muted", False))])
+        cmds.append(["set_property", "speed", session_data.get("speed", 1)])
+        loop_mode = str(session_data.get("loop") or "off")
+        cmds.append(["set_property", "loop-file", "inf" if loop_mode == "one" else "no"])
+        cmds.append(["set_property", "loop-playlist", "inf" if loop_mode == "all" else "no"])
+        cmds.append(["set_property", "pause", False])
+        ok_cnt, _ = self.batch_send(cmds, timeout=timeout)
+        if ok_cnt <= 0:
+            return 0
+        try:
+            tpos = float(session_data.get("time_pos") or 0.0)
+        except (TypeError, ValueError):
+            tpos = 0.0
+        if tpos > 1.0:
+            time.sleep(0.25)
+            self.send(["seek", tpos, "absolute"])
+        return len(playlist)
 
     def batch_status_snapshot(self) -> dict[str, Any] | None:
         """Query all playback status properties in one IPC roundtrip."""
@@ -665,6 +1046,107 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(payload, dict):
             payload = {}
         trigger_hooks(event, payload, hooks_dir=hdir, timeout=3.0)
+        return 0
+
+    if cmd == "parse-spotify-html":
+        for t, a in parse_spotify_html(sys.stdin.read()):
+            print(f"{t}\t{a}")
+        return 0
+
+    if cmd == "fetch-spotify-tracks" and len(args) >= 3:
+        rows = fetch_spotify_tracks(args[1], args[2], args[3] if len(args) > 3 else "")
+        for t, a in rows:
+            print(f"{t}\t{a}")
+        return 0
+
+    if cmd == "fetch-lyrics":
+        as_json = "--json" in args[1:]
+        pos = [a for a in args[1:] if a != "--json"]
+        title = pos[0] if len(pos) > 0 else ""
+        artist = pos[1] if len(pos) > 1 else ""
+        try:
+            dur = float(pos[2]) if len(pos) > 2 and pos[2] else 0.0
+        except (TypeError, ValueError):
+            dur = 0.0
+        query = pos[3] if len(pos) > 3 else ""
+        res = fetch_lyrics(title, artist=artist, duration=dur, query=query)
+        if res is None:
+            return 1
+        if as_json:
+            synced_payload = (
+                {
+                    "title": res["title"],
+                    "artist": res["artist"],
+                    "lines": [{"t": t, "text": txt} for t, txt in res["synced_lines"]],
+                }
+                if res.get("synced_lines")
+                else None
+            )
+            print(
+                json.dumps(
+                    {
+                        "source": res["source"],
+                        "title": res["title"],
+                        "artist": res["artist"],
+                        "plain": format_lyrics_plain(res),
+                        "synced_json": synced_payload,
+                    }
+                )
+            )
+        else:
+            print(format_lyrics_plain(res))
+        return 0
+
+    if cmd == "mpv-batch" and len(args) >= 2:
+        try:
+            cmds = json.load(sys.stdin)
+        except Exception:
+            return 1
+        if not isinstance(cmds, list):
+            return 1
+        ok_cnt, total = MpvClient(args[1], timeout=5.0).batch_send(cmds, timeout=5.0)
+        print(json.dumps({"ok": ok_cnt, "total": total}))
+        return 0 if (total == 0 or ok_cnt == total) else 1
+
+    if cmd == "mpv-load-batch" and len(args) >= 2:
+        action = args[2] if len(args) > 2 else "play"
+        raw = sys.stdin.read().strip()
+        if not raw:
+            return 1
+        items: list[dict[str, Any]] = []
+        if raw.startswith("["):
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, list):
+                    items = [x for x in loaded if isinstance(x, dict)]
+            except Exception:
+                return 1
+        else:
+            for ln in raw.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    obj = json.loads(ln)
+                    if isinstance(obj, dict):
+                        items.append(obj)
+                except Exception:
+                    return 1
+        ok_cnt, total = MpvClient(args[1], timeout=5.0).batch_loadfile(items, action=action, timeout=5.0)
+        print(json.dumps({"ok": ok_cnt, "total": total}))
+        return 0 if ok_cnt > 0 else 1
+
+    if cmd == "mpv-resume" and len(args) >= 3:
+        try:
+            sess = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+        except Exception:
+            return 1
+        if not isinstance(sess, dict):
+            return 1
+        cnt = MpvClient(args[1], timeout=5.0).resume_session(sess, timeout=5.0)
+        if cnt <= 0:
+            return 1
+        print(cnt)
         return 0
 
     return 1
