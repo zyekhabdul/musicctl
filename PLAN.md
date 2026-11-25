@@ -1,7 +1,7 @@
 # WORK PACKET 2: v2.2.0 MULTI-CATALOG, AUDIOPHILE AUDIO & PRODUCTION DOWNLOAD BACKEND
 
 - **Track**: Track B / Spec-Driven Incremental Delivery (Zero-Bloat CLI & TUI)
-- **Status**: PLANNED [0/9 CHUNKS]
+- **Status**: COMPLETED [9/9 CHUNKS]
 - **Obsidian Namespace**: `00-AGY-Memory/musicctl` (`INDEX`, `CONTEXT`, `STATE`, `DECISIONS`)
 - **Base Commit**: `a72e23fab524ce5ba982ac6c1aa49bd99d092848` (`v2.1.0` + pre-WP2 hardening)
 - **Verified Baseline**: `make lint` (`shellcheck -S warning`) exit 0 | `test_musicctl.sh` 153/153 offline PASS | `test_tui.py` 20/20 OK
@@ -18,7 +18,7 @@
 
 ## 2. Active Work Packet (Max 10 Chunks)
 
-### [ ] Chunk WP2A: Multi-Catalog Entity Engine (`lib/catalog.py`)
+### [x] Chunk WP2A: Multi-Catalog Entity Engine (`lib/catalog.py`)
 - **Target Files**: `lib/catalog.py` (new), `bin/musicctl`, `tests/test_tui.py`, `tests/test_musicctl.sh`
 - **Steps**:
   1. Implement `lib/catalog.py` (Python 3 stdlib only) with a canonical entity schema (`{source, id, type, isrc, title, artist, album, track_num, year, duration, cover_url}`) and zero-key catalog adapters:
@@ -29,7 +29,7 @@
 - **Definition of Done (DoD)**:
   - Offline JSON fixture tests verify canonical schema mapping and `search`/`browse` parsing across `ytm` (`MPREb_*`, `UC*`, `VLPL*`), `deezer` (with ISRC + square art), and `itunes`; `make lint && make test` exits `0`.
 
-### [ ] Chunk WP2B: End-to-End Album, ISRC & Clean Metadata Propagation
+### [x] Chunk WP2B: End-to-End Album, ISRC & Clean Metadata Propagation
 - **Target Files**: `bin/musicctl`, `lib/common.py`, `lib/tui.py`, `tests/test_musicctl.sh`, `tests/test_tui.py`
 - **Steps**:
   1. Add `parse_meta_album` in `bin/musicctl` (and extract `album`, `isrc`, `cover_url`, `track_num`, `year` from `lib/catalog.py` / `mpv` `metadata/by-key/album`) instead of passing `""`, plus clean title normalization (stripping `(Official Video)` / `(Lyrics)` noise for provider/lyrics matching).
@@ -38,7 +38,7 @@
 - **Definition of Done (DoD)**:
   - Provider JSON stdin test verifies non-empty `album`, `isrc`, and clean normalized title; `ffprobe` test confirms `album` tag written into `.flac` and `.m4a` downloads.
 
-### [ ] Chunk WP2C: Audiophile Playback Engine, SponsorBlock & Infinite Autoplay
+### [x] Chunk WP2C: Audiophile Playback Engine, SponsorBlock & Infinite Autoplay
 - **Target Files**: `lib/mpv_hooks.lua` (new), `bin/musicctl`, `lib/common.py`, `lib/tui.py`, `tests/test_musicctl.sh`, `tests/test_tui.py`
 - **Steps**:
   1. Upgrade YTM stream format priority to `774/251/141/bestaudio[acodec=opus]/bestaudio/best` with opt-in `MUSICCTL_YTM_COOKIES` (supporting YTM Premium 256k Opus/AAC while preserving `--ignore-config` default for anonymous users).
@@ -47,7 +47,7 @@
 - **Definition of Done (DoD)**:
   - Offline tests verify SponsorBlock segment JSON parsing, `ytm_format_for_quality` `774/251/141` priority, `MUSICCTL_REPLAYGAIN` arg generation, and `autoplay` queue append guard; `make lint && make test` exits `0`.
 
-### [ ] Chunk WP2D: Production Download Engine (`lib/downloader.py`) & Lazy Provider SSOT (`lib/providers.py`)
+### [x] Chunk WP2D: Production Download Engine (`lib/downloader.py`) & Lazy Provider SSOT (`lib/providers.py`)
 - **Target Files**: `lib/providers.py` (new), `lib/downloader.py` (new), `bin/musicctl`, `tests/test_tui.py`, `tests/test_musicctl.sh`
 - **Steps**:
   1. Extract `lib/providers.py` (Python 3 stdlib) as the single source of truth for provider resolution (`iter_provider_candidates` lazy generator short-circuiting on first valid match instead of eagerly executing all scripts), stream probing, `ffprobe` validation, and `hires -> cd -> YTM` cascade — shared in-process by `lib/downloader.py` (`--jobs 1..4`) and via a single CLI entrypoint from `bin/musicctl` (`load_track_target`).
@@ -57,7 +57,7 @@
 - **Definition of Done (DoD)**:
   - Isolated tests verify lazy short-circuiting in `lib/providers.py`, archive skip on repeat run, `dl sync` prune/mirror, custom template directory creation, `.lrc` sidecar generation, `--format auto` remux without re-encoding, strict `cd`/`hires` `ffprobe` tier rejection & cascade, `small` `libopus`/`m4a` transcode, `--format mp3`/`m4a`/`opus`/`flac` outputs via `ffprobe`, and concurrent `--jobs 2` completion.
 
-### [ ] Chunk WP2E: Local Library Indexer & Artist/Album Grouping (`lib/library.py`)
+### [x] Chunk WP2E: Local Library Indexer & Artist/Album Grouping (`lib/library.py`)
 - **Target Files**: `lib/library.py` (new), `bin/musicctl`, `tests/test_tui.py`, `tests/test_musicctl.sh`
 - **Steps**:
   1. Implement `lib/library.py` scanning `$MUSICCTL_DOWNLOAD_DIR` incrementally (keyed by `(path, mtime_ns, size)` in `$MUSICCTL_CACHE_DIR/library.json`) using `ffprobe` tags (`artist`, `album`, `title`, `track`, `duration`, `codec`) with filename fallback.
@@ -65,7 +65,7 @@
 - **Definition of Done (DoD)**:
   - Test creates tagged `.flac`/`.m4a` files, verifies incremental cache hit (0 duplicate `ffprobe` calls on unchanged mtime), and verifies `local --by artist` and `local --by album` output.
 
-### [ ] Chunk WP2F: Provider Chain v2 (DASH FLAC + OpenSubsonic) & UNIX Lifecycle Hooks
+### [x] Chunk WP2F: Provider Chain v2 (DASH FLAC + OpenSubsonic) & UNIX Lifecycle Hooks
 - **Target Files**: `lib/providers.py`, `lib/mpv_hooks.lua`, `bin/musicctl`, `lib/downloader.py`, `examples/providers/README.md`, `examples/providers/10-lossless-template.sh`, `examples/providers/20-opensubsonic.sh` (new), `examples/hooks/README.md` (new), `tests/test_musicctl.sh`
 - **Steps**:
   1. Extend `lib/providers.py` stdin JSON contract (backwards-compatible) with `source`, `isrc`, `album`, `track_num`, `year`, `format`; support Orpheon-style `manifest` stdout output (MPEG-DASH `.mpd` / fragmented MP4 FLAC) with `ffmpeg -c copy` DASH-to-FLAC remuxing alongside direct `url`, maintaining lazy multi-candidate fallback if a higher-priority stream/download fails validation.
@@ -74,7 +74,7 @@
 - **Definition of Done (DoD)**:
   - Mock hook test verifies JSON payload delivery on `on-download-complete` and `on-track-change`, mock DASH `.mpd` / provider test verifies FLAC remux & OpenSubsonic adapter JSON output, and slow/non-zero hooks never fail or block playback/download.
 
-### [ ] Chunk WP2G: Non-Blocking TUI Download Manager & JSONL Progress
+### [x] Chunk WP2G: Non-Blocking TUI Download Manager & JSONL Progress
 - **Target Files**: `lib/downloader.py`, `lib/tui.py`, `bin/musicctl`, `tests/test_tui.py`
 - **Steps**:
   1. Add `--jsonl` progress output mode to `lib/downloader.py` emitting `{job_id, title, stage, pct, status, dest, error}` events.
@@ -83,7 +83,7 @@
 - **Definition of Done (DoD)**:
   - Unit tests in `test_tui.py` verify JSONL progress event parsing and `drain_ui_events` progress/completion/error state transitions without blocking the curses loop.
 
-### [ ] Chunk WP2H: TUI Multi-Catalog Switcher, Drill-Down Stack & `7 Pl` Playlists Tab
+### [x] Chunk WP2H: TUI Multi-Catalog Switcher, Drill-Down Stack & `7 Pl` Playlists Tab
 - **Target Files**: `lib/tui.py`, `tests/test_tui.py`
 - **Steps**:
   1. Add clickable & hotkey catalog switcher (`[Cat:ytm|deezer|itunes]`) and search scope selector (`[Songs] [Albums] [Artists] [Playlists]`) to the search bar in `lib/tui.py`.
@@ -92,7 +92,7 @@
 - **Definition of Done (DoD)**:
   - Unit tests verify `nav_stack` push/pop cursor restoration, catalog/scope switching, `6 Local` grouping toggle, and `7 Pl` TSV loading.
 
-### [ ] Chunk WP2I: Packaging, Completions, Docs, Obsidian Sync & `v2.2.0` Verification
+### [x] Chunk WP2I: Packaging, Completions, Docs, Obsidian Sync & `v2.2.0` Verification
 - **Target Files**: `install.sh`, `Makefile`, `packaging/arch/PKGBUILD`, `completions/musicctl.bash`, `completions/_musicctl`, `README.md`, `CHANGELOG.md`, `tests/test_musicctl.sh`, `tests/test_tui.py`
 - **Steps**:
   1. Register `lib/catalog.py`, `lib/downloader.py`, `lib/library.py`, `lib/providers.py`, and `lib/mpv_hooks.lua` in `install.sh`, `Makefile` (`py_compile`), and `packaging/arch/PKGBUILD`.

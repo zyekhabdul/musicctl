@@ -4,8 +4,8 @@ Lightweight, standalone YouTube Music CLI & TUI player modeled after `gamectl`.
 Streams ad-free audio via InnerTube (`WEB_REMIX`) + `yt-dlp` + background `mpv` IPC daemon + **clickable realtime Sovereign Dashboard** (~20-30 MB RAM, zero Electron).
 
 ```text
- MUSICCTL v2.1   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local         [PLAY] OPUS 48kHz
- Search: [ pamungkas to the bone        ]  [Search] [Clear]
+ MUSICCTL v2.2   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local  7 Pl  [PLAY] OPUS 48kHz
+ [Cat:ytm] [Songs] [Albums] [Artists] [Lists] [ pamungkas to the bone ] [Search] [Clear]
 ╭─ 1 Home (12) ─────────────────────────╮╭─ NOW PLAYING ──────────────────────────────────────╮
 │▸ 1.* To the Bone — Pamungkas    [FAV] ││ [ART]  To the Bone                                │
 │  2.  Monolog — Pamungkas        [HIS] ││        Audio: opus 48kHz  |  Queue: 1/12           │
@@ -50,9 +50,10 @@ Run `musicctl doctor` to verify dependencies, MPRIS detection, daemon state, and
 musicctl                        # Launch clickable realtime Sovereign Dashboard
 musicctl tui "pamungkas"        # Launch Dashboard preloaded with YTM search
 musicctl fzf [query]            # Launch legacy fzf cockpit (1s realtime ticker)
-musicctl play "to the bone"     # Search YTM (or local file/URL/ID) and play
-musicctl add "one only"         # Append top match to mpv queue
-musicctl search "lofi beats"    # Print TSV search results (id, title, meta)
+musicctl play "to the bone"     # Search YTM / catalog ref / local file / URL and play
+musicctl add "one only"         # Append top match / album / playlist ref to mpv queue
+musicctl search [--catalog S] [--type T] "lofi"  # Search ytm|deezer|itunes (songs|albums|artists|playlists)
+musicctl browse <ref>           # Browse album, artist, or playlist (ytm/deezer/itunes)
 musicctl radio [current|query]  # Start/append YTM Up Next Radio mix
 musicctl toggle                 # Toggle play/pause
 musicctl next | prev            # Next / previous track in queue
@@ -66,14 +67,16 @@ musicctl mute                   # Toggle mute
 musicctl quality [small|cd|hires|ask|cycle]  # Set audio quality & provider priority
 musicctl eq [preset|cycle]      # Set EQ (flat/bass/warm/vocal/bright/rock)
 musicctl norm [on|off|toggle]   # Toggle EBU R128 loudness normalization
+musicctl autoplay [on|off|tgl]  # Toggle infinite Up Next Radio autoplay
 musicctl speed <0.25..4.0|reset># Set playback speed
 musicctl vol 80                 # Set volume (supports +10 / -10)
 musicctl seek +15               # Seek relative seconds
 musicctl status [--json]        # Show status, loop/mute/speed, or Waybar JSON
 musicctl queue                  # List active mpv queue
 musicctl lyrics [--live] [q]    # Fetch lyrics via LRCLIB / Fallback (or --live sync)
-musicctl dl [--quality T] [q]   # Download track (FLAC/M4A/Opus) + embedded tags & cover
-musicctl local                  # List downloaded local audio files
+musicctl dl [--quality T] [--format F] [--jobs N] [--lrc] [--replaygain] [target|sync <src> [--prune]]
+                                # Concurrent download engine, template paths, sync & archive
+musicctl local [--by flat|artist|album] [--rescan] [q]  # Incremental indexed local library
 musicctl pl ls|create|add|show|play|move|sync|import|rm|delete  # Playlists, smart sync & Spotify URL import
 musicctl sleep <min|off|status> # Auto-stop sleep timer
 musicctl resume | save          # Restore or snapshot queue & playback position
@@ -93,12 +96,13 @@ musicctl stop                   # Save session and stop background mpv daemon
 | Click / Double-click / Right-click row | Select / Play or Jump / Enqueue track |
 | Click progress / volume bar, Wheel | Seek timestamp / Set volume / Scroll list |
 | `/` or `Ctrl-S` | Focus search input (`Esc` to leave) |
-| `1`-`6` / `Tab` | Switch left tabs / Cycle right panel (`Up Next`, `Lyrics`, `Info`) |
+| `1`-`7` / `Tab` | Switch left tabs (`7 Pl` playlists) / Cycle right panel (`Up Next`, `Lyrics`, `Info`, `DL`) |
+| `C` / `T` / `L` / `Backspace` | Cycle catalog / search type / local grouping (`Flat`/`Artists`/`Albums`) / Back |
 | `j`/`k` or `Up`/`Down`, `g`/`G` | Move cursor (`g` top, `G` bottom) |
 | `J` / `K` (on Queue tab) | Move selected queue track down / up |
-| `Enter` / `a` / `f` / `r` / `d` | Play or Jump / Enqueue / Toggle fav / Queue radio / Download |
+| `Enter` / `a` / `f` / `r` / `d` | Play or Open / Enqueue / Toggle fav / Queue radio / Non-blocking download |
 | `Space` / `n` / `b` / `x` | Pause or Play / Next / Prev / Stop daemon |
-| `o` / `u` / `Q` / `e` / `N` / `m` | Cycle loop / Shuffle / Cycle quality / Cycle EQ / Toggle norm / Mute |
+| `o` / `u` / `Q` / `e` / `N` / `A` / `m` | Cycle loop / Shuffle / Cycle quality / Cycle EQ / Toggle norm / Autoplay / Mute |
 | `+` or `=` / `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |
 | `?` / `q` | Toggle help modal / Quit TUI (daemon stays alive) |
 
@@ -141,13 +145,19 @@ MUSICCTL_ART_FORMAT=symbols
 MUSICCTL_EQ=flat
 MUSICCTL_NORM=0
 MUSICCTL_QUALITY=cd
+MUSICCTL_CATALOG=ytm
 MUSICCTL_PROVIDERS_DIR="$HOME/.config/musicctl/providers"
+MUSICCTL_HOOKS_DIR="$HOME/.config/musicctl/hooks"
 MUSICCTL_DOWNLOAD_DIR="$HOME/Music/musicctl"
+MUSICCTL_DL_TEMPLATE="{artist}/{album}/{track:02d} - {title}"
+MUSICCTL_REPLAYGAIN=track
+MUSICCTL_SPONSORBLOCK=0
+MUSICCTL_AUTOPLAY=0
 ```
 
 Set `MUSICCTL_ART_FORMAT=sixel` for high-resolution Sixel album art on terminals like `foot`.
 
-For Orpheon-style lossless (`cd`/`hires`) streaming and downloads, place executable provider scripts in `$MUSICCTL_PROVIDERS_DIR` — see [examples/providers/README.md](examples/providers/README.md).
+For lossless streaming/downloads (including OpenSubsonic/Navidrome & DASH `.mpd` manifests), place executable provider scripts in `$MUSICCTL_PROVIDERS_DIR` — see [examples/providers/README.md](examples/providers/README.md). For scrobbling and RPC hooks (`on-track-change`, `on-download-complete`), see [examples/hooks/README.md](examples/hooks/README.md).
 
 ## Waybar Custom Module Snippet
 

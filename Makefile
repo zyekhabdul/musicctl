@@ -14,15 +14,15 @@ help:
 
 lint:
 	@set -e; \
-	for file in bin/musicctl install.sh tests/test_musicctl.sh completions/musicctl.bash; do \
+	for file in bin/musicctl install.sh tests/test_musicctl.sh completions/musicctl.bash examples/providers/20-opensubsonic.sh; do \
 		bash -n "$$file"; \
 	done; \
-	python3 -m py_compile lib/common.py lib/tui.py tests/test_tui.py; \
+	python3 -m py_compile lib/common.py lib/catalog.py lib/providers.py lib/downloader.py lib/library.py lib/tui.py tests/test_tui.py; \
 	if command -v desktop-file-validate >/dev/null 2>&1; then \
 		desktop-file-validate musicctl.desktop; \
 	fi; \
 	if command -v shellcheck >/dev/null 2>&1 && shellcheck --version >/dev/null 2>&1; then \
-		shellcheck -s bash -S warning bin/musicctl install.sh tests/test_musicctl.sh; \
+		shellcheck -s bash -S warning bin/musicctl install.sh tests/test_musicctl.sh examples/providers/20-opensubsonic.sh; \
 	elif [ "$${STRICT_LINT:-0}" = "1" ]; then \
 		echo "[FAIL] STRICT_LINT=1 requires working shellcheck in PATH" >&2; \
 		exit 1; \

@@ -7,7 +7,7 @@ _musicctl_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]:-}"
 
-  local commands="tui fzf play add search radio toggle pause next prev jump move mv remove rm clear shuffle loop repeat mute quality eq norm speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
+  local commands="tui fzf play add search browse radio toggle pause next prev jump move mv remove rm clear shuffle loop repeat mute quality eq norm autoplay speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
 
   if ((COMP_CWORD == 1)); then
     COMPREPLY=( $(compgen -W "$commands --help --version" -- "$cur") )
@@ -15,6 +15,20 @@ _musicctl_complete() {
   fi
 
   case "$cmd" in
+    search)
+      if [[ "$prev" == "--catalog" || "$prev" == "-c" ]]; then
+        COMPREPLY=( $(compgen -W "ytm deezer itunes" -- "$cur") )
+      elif [[ "$prev" == "--type" || "$prev" == "-t" ]]; then
+        COMPREPLY=( $(compgen -W "songs albums artists playlists" -- "$cur") )
+      elif [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--catalog --type --json" -- "$cur") )
+      fi
+      ;;
+    browse)
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--json --tsv" -- "$cur") )
+      fi
+      ;;
     fav)
       if ((COMP_CWORD == 2)); then
         COMPREPLY=( $(compgen -W "list ls add rm del play" -- "$cur") )
@@ -62,11 +76,27 @@ _musicctl_complete() {
     norm)
       COMPREPLY=( $(compgen -W "on off toggle status" -- "$cur") )
       ;;
+    autoplay)
+      COMPREPLY=( $(compgen -W "on off toggle status" -- "$cur") )
+      ;;
+    local)
+      if [[ "$prev" == "--by" ]]; then
+        COMPREPLY=( $(compgen -W "flat artist album" -- "$cur") )
+      elif [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--by --rescan --json" -- "$cur") )
+      fi
+      ;;
     dl|download)
       if [[ "$prev" == "--quality" || "$prev" == "-q" ]]; then
         COMPREPLY=( $(compgen -W "small cd hires ask" -- "$cur") )
+      elif [[ "$prev" == "--format" || "$prev" == "-f" ]]; then
+        COMPREPLY=( $(compgen -W "auto flac opus m4a mp3" -- "$cur") )
+      elif [[ "$prev" == "--jobs" || "$prev" == "-j" ]]; then
+        COMPREPLY=( $(compgen -W "1 2 3 4" -- "$cur") )
       elif [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--quality -q" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--quality -q --format -f --jobs -j --template -t --lrc --replaygain --force --dry-run --prune --jsonl --json" -- "$cur") )
+      elif ((COMP_CWORD == 2)); then
+        COMPREPLY=( $(compgen -W "sync status cancel current" -- "$cur") )
       fi
       ;;
     play|add)

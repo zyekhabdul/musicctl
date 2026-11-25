@@ -10,23 +10,30 @@ If every provider returns empty output or fails validation, `musicctl` automatic
 
 ## Provider JSON Contract
 
-**Stdin (from `musicctl`):**
+**Stdin (from `musicctl`, v2 contract):**
 ```json
 {
   "id": "IR7tYHdYN2Q",
+  "source": "ytm",
   "title": "To the Bone",
   "artist": "Pamungkas",
-  "album": "",
+  "album": "Walk the Talk",
+  "isrc": "ID1234567890",
+  "track_num": 4,
+  "year": 2018,
   "duration": 345,
   "quality": "cd",
+  "format": "auto",
   "mode": "download"
 }
 ```
+- `source`: `ytm`, `deezer`, `itunes`, `spotify`, or `local`.
 - `quality`: `small`, `cd` (FLAC 16-bit/44.1kHz target), or `hires` (FLAC 24-bit/96-192kHz target).
+- `format`: requested container (`auto`, `flac`, `opus`, `m4a`, `mp3`).
 - `mode`: `stream` or `download`.
 
 **Stdout (from provider):**
-Return empty output (and exit 0 or non-zero) to pass to the next provider, or output a single JSON object:
+Return empty output (and exit 0 or non-zero) to pass to the next provider, or output a single JSON object with either `url` or MPEG-DASH `manifest`:
 ```json
 {
   "url": "https://cdn.example.com/track.flac",
@@ -38,7 +45,16 @@ Return empty output (and exit 0 or non-zero) to pass to the next provider, or ou
   }
 }
 ```
-Local paths (`/path/to/file.flac` or `file://...`) are also accepted for local libraries or custom bridges.
+Or an Orpheon-style MPEG-DASH FLAC manifest (HTTP(S) URL, local `.mpd` path, `file://`, or inline `<MPD ...>` XML):
+```json
+{
+  "manifest": "https://cdn.example.com/stream.mpd",
+  "codec": "flac",
+  "bit_depth": 24,
+  "sample_rate": 96000
+}
+```
+Local paths (`/path/to/file.flac` or `file://...`) are also accepted. Included OpenSubsonic/Navidrome adapter: [20-opensubsonic.sh](20-opensubsonic.sh).
 
 ## Verification & Auto-Tagging
 

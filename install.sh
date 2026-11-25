@@ -41,19 +41,23 @@ fi
 BASH_COMP="${DATA_DIR}/bash-completion/completions/musicctl"
 ZSH_COMP="${DATA_DIR}/zsh/site-functions/_musicctl"
 DESKTOP_DST="${DATA_DIR}/applications/musicctl.desktop"
-COMMON_DST="${DATA_DIR}/musicctl/common.py"
-TUI_DST="${DATA_DIR}/musicctl/tui.py"
+LIB_DST_DIR="${DATA_DIR}/musicctl"
+LIB_FILES=(common.py catalog.py providers.py downloader.py library.py tui.py mpv_hooks.lua)
 
 if ((UNINSTALL == 1)); then
-  rm -f "${BIN_DIR}/musicctl" "$BASH_COMP" "$ZSH_COMP" "$DESKTOP_DST" "$COMMON_DST" "$TUI_DST"
-  rmdir "${DATA_DIR}/musicctl" 2>/dev/null || true
+  rm -f "${BIN_DIR}/musicctl" "$BASH_COMP" "$ZSH_COMP" "$DESKTOP_DST"
+  for lf in "${LIB_FILES[@]}"; do
+    rm -f "${LIB_DST_DIR}/${lf}"
+  done
+  rmdir "$LIB_DST_DIR" 2>/dev/null || true
   echo "[OK] Uninstalled musicctl from ${PREFIX}"
   exit 0
 fi
 
 install -Dm755 "${SCRIPT_DIR}/bin/musicctl" "${BIN_DIR}/musicctl"
-install -Dm644 "${SCRIPT_DIR}/lib/common.py" "$COMMON_DST"
-install -Dm644 "${SCRIPT_DIR}/lib/tui.py" "$TUI_DST"
+for lf in "${LIB_FILES[@]}"; do
+  install -Dm644 "${SCRIPT_DIR}/lib/${lf}" "${LIB_DST_DIR}/${lf}"
+done
 install -Dm644 "${SCRIPT_DIR}/completions/musicctl.bash" "$BASH_COMP"
 install -Dm644 "${SCRIPT_DIR}/completions/_musicctl" "$ZSH_COMP"
 install -Dm644 "${SCRIPT_DIR}/musicctl.desktop" "$DESKTOP_DST"
@@ -63,7 +67,7 @@ if [[ "$PREFIX" != "/usr" && "$PREFIX" != "/usr/local" ]]; then
 fi
 
 echo "[OK] Installed musicctl -> ${BIN_DIR}/musicctl"
-echo "[OK] TUI module -> ${TUI_DST}"
+echo "[OK] Runtime modules -> ${LIB_DST_DIR}/"
 echo "[OK] Completions -> ${BASH_COMP}, ${ZSH_COMP}"
 echo "[OK] Desktop entry -> ${DESKTOP_DST}"
 

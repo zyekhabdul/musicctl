@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.2.0 (2026-11-25)
+
+- **Multi-Catalog Entity Engine (`lib/catalog.py`)**: Zero-key search and browse across `ytm`, `deezer` (ISRC + 1000x1000 square art), and `itunes` (`songs|albums|artists|playlists`), plus universal `play`/`add`/`dl` support for catalog refs, Spotify, SoundCloud, Bandcamp, and local files.
+- **Metadata & Clean Matching**: End-to-end `album`, `year`, `track_num`, and `isrc` propagation into `mpv`, provider stdin contracts, `ffprobe`/`ffmpeg` tags, `status --json`, and `lib/tui.py` cards, paired with clean title normalization.
+- **Audiophile Playback, SponsorBlock & Autoplay (`lib/mpv_hooks.lua`)**: Upgraded YTM format priority (`774/251/141`), opt-in `MUSICCTL_YTM_COOKIES`, `soxr` high-precision resampler, native Hi-Res sample-rate preservation when `norm=off`, `MUSICCTL_REPLAYGAIN`, SponsorBlock auto-skip (`MUSICCTL_SPONSORBLOCK=1`), and CLI + TUI infinite Up Next Radio (`musicctl autoplay`).
+- **Production Download Engine (`lib/downloader.py`) & Lazy Provider SSOT (`lib/providers.py`)**: Concurrent `--jobs 1..4` downloads, `--format auto|flac|opus|m4a|mp3`, zero generation-loss remux on `auto`, `libopus` `small` default, `--template`, `--lrc`, `--replaygain`, `--force`, `--dry-run`, `dl sync <source> [--prune]`, `download-archive.tsv`, center-cropped square cover art, `--jsonl` progress, and `dl status|cancel`.
+- **Incremental Local Library Indexer (`lib/library.py`)**: `(path, mtime_ns, size)` index at `$MUSICCTL_CACHE_DIR/library.json` powering `musicctl local [--by flat|artist|album] [--rescan] [--json] <query>`.
+- **Provider Chain v2 & Lifecycle Hooks**: Added `source`/`format` provider fields, MPEG-DASH `.mpd` FLAC remuxing, OpenSubsonic/Navidrome adapter ([examples/providers/20-opensubsonic.sh](examples/providers/20-opensubsonic.sh)), and 3s non-blocking `on-track-change` / `on-download-complete` UNIX hooks ([examples/hooks/README.md](examples/hooks/README.md)).
+- **TUI Drill-Down Dashboard (`lib/tui.py`)**: Added catalog (`[Cat:...]`) & scope (`[Songs|Albums|Artists|Lists]`) switchers, recursive `nav_stack` drill-down with `Play All`/`+Q All`/`DL All`, `6 Local` grouping toggle (`Flat`/`Artists`/`Albums`), `7 Pl` playlists tab, and non-blocking `DownloadManager` (`DL` tab).
+
 ## v2.1.0 (2026-11-25)
 
 - Added queue and named playlist track reordering (`musicctl move`, `musicctl pl move`, and TUI `J`/`K` + `Move Up`/`Move Down` buttons).

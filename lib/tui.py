@@ -25,14 +25,19 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+import catalog
+import library
+
 from common import (
     TS_RE,
     VIDEO_ID_RE,
     MpvClient,
+    extract_metadata_fields,
     extract_primary_artist,
     extract_video_id,
     format_mmss,
     format_speed,
+    normalize_track_title,
     parse_fallback_lyrics_json,
     parse_synced_lyrics_lines,
     pick_best_lyrics_candidate,
@@ -85,6 +90,27 @@ def format_audio_badge(codec: str, samplerate: Any, sample_fmt: str = "") -> str
         khz = sr / 1000.0
         hz_lbl = f" {int(khz)}kHz" if sr % 1000 == 0 else f" {khz:.1f}kHz"
     return f"{c.upper()}{bits_lbl}{hz_lbl}"
+
+
+def format_album_line(album: str, year: int = 0) -> str:
+    """Format album and optional release year for TUI display."""
+    alb = (album or "").strip()
+    if not alb:
+        return ""
+    return f"{alb} ({year})" if year > 0 else alb
+
+
+def extract_album_from_meta(meta: str) -> str:
+    """Extract album name from bullet-delimited track metadata string."""
+    parts = [p.strip() for p in (meta or "").split("•") if p.strip()]
+    if len(parts) < 2 or parts[0] in ("Album", "Single", "EP", "Playlist", "Artist"):
+        return ""
+    cand = parts[1]
+    if re.match(r"^\d+:\d{2}(?::\d{2})?$", cand) or re.match(r"^(?:19|20)\d{2}$", cand):
+        return ""
+    if cand in ("Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"):
+        return ""
+    return cand
 
 
 def calc_seek_target(rel_x: int, bar_width: int, duration: float) -> float:
@@ -219,6 +245,161 @@ def parse_ansi_art(ansi_text: str) -> list[list[tuple[str, int, int]]]:
     return rows
 
 
+def parse_download_jsonl_line(line: str) -> dict[str, Any] | None:
+    """Parse one --jsonl progress line from lib/downloader.py."""
+    s = (line or "").strip()
+    if not s or not s.startswith("{"):
+        return None
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return None
+    if not isinstance(obj, dict) or "job_id" not in obj:
+        return None
+    try:
+        pct = max(0, min(100, int(obj.get("pct") or 0)))
+    except (TypeError, ValueError):
+        pct = 0
+    return {
+        "job_id": str(obj.get("job_id") or ""),
+        "title": str(obj.get("title") or "download"),
+        "stage": str(obj.get("stage") or ""),
+        "pct": pct,
+        "status": str(obj.get("status") or "running"),
+        "dest": str(obj.get("dest") or ""),
+        "error": str(obj.get("error") or ""),
+    }
+
+
+class DownloadManager:
+    """Non-blocking background downloader streaming JSONL progress into ui_events."""
+
+    def __init__(self, bin_path: str, ui_events: queue.SimpleQueue[tuple[str, Any]]) -> None:
+        self.bin_path = bin_path
+        self.ui_events = ui_events
+        self.lock = threading.Lock()
+        self.procs: list[subprocess.Popen[str]] = []
+        self._seq = 0
+
+    def start(self, dl_args: list[str], label: str = "") -> str:
+        with self.lock:
+            self._seq += 1
+            local_id = f"dlm-{int(time.time())}-{self._seq}"
+        disp = (label or " ".join(dl_args) or "download").strip()
+        self.ui_events.put(
+            (
+                "dl_event",
+                {
+                    "job_id": local_id,
+                    "title": disp,
+                    "stage": "queued",
+                    "pct": 0,
+                    "status": "running",
+                    "dest": "",
+                    "error": "",
+                },
+            )
+        )
+
+        def worker() -> None:
+            proc: subprocess.Popen[str] | None = None
+            saw_event = False
+            try:
+                proc = subprocess.Popen(
+                    [self.bin_path, "dl", "--jsonl", *dl_args],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                with self.lock:
+                    self.procs.append(proc)
+                if proc.stdout is not None:
+                    for raw_line in proc.stdout:
+                        ev = parse_download_jsonl_line(raw_line)
+                        if ev is not None:
+                            saw_event = True
+                            ev["_client_id"] = local_id
+                            self.ui_events.put(("dl_event", ev))
+                _, err_out = proc.communicate()
+                if proc.returncode == 0 and not saw_event:
+                    self.ui_events.put(
+                        (
+                            "dl_event",
+                            {
+                                "job_id": local_id,
+                                "title": disp,
+                                "stage": "done",
+                                "pct": 100,
+                                "status": "done",
+                                "dest": "",
+                                "error": "",
+                            },
+                        )
+                    )
+                elif proc.returncode != 0 and not saw_event:
+                    err_lines = (err_out or "Download failed").strip().splitlines()
+                    err = re.sub(r"\x1b\[[0-9;]*m", "", err_lines[-1] if err_lines else "Download failed")
+                    self.ui_events.put(
+                        (
+                            "dl_event",
+                            {
+                                "job_id": local_id,
+                                "title": disp,
+                                "stage": "failed",
+                                "pct": 100,
+                                "status": "error",
+                                "dest": "",
+                                "error": err[:80],
+                            },
+                        )
+                    )
+            except Exception as exc:
+                self.ui_events.put(
+                    (
+                        "dl_event",
+                        {
+                            "job_id": local_id,
+                            "title": disp,
+                            "stage": "failed",
+                            "pct": 100,
+                            "status": "error",
+                            "dest": "",
+                            "error": str(exc)[:80],
+                        },
+                    )
+                )
+            finally:
+                if proc is not None:
+                    with self.lock:
+                        if proc in self.procs:
+                            self.procs.remove(proc)
+
+        threading.Thread(target=worker, daemon=True).start()
+        return local_id
+
+    def cancel_all(self) -> int:
+        count = 0
+        with self.lock:
+            active = list(self.procs)
+        for p in active:
+            if p.poll() is None:
+                try:
+                    p.terminate()
+                    count += 1
+                except OSError:
+                    pass
+        try:
+            subprocess.run(
+                [self.bin_path, "dl", "cancel", "all"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3.0,
+            )
+        except Exception:
+            pass
+        return count
+
+
 @dataclasses.dataclass
 class Hitbox:
     x0: int
@@ -242,8 +423,12 @@ class SovereignDashboard:
         ("fav", "4 Favs"),
         ("hist", "5 Hist"),
         ("local", "6 Local"),
+        ("playlists", "7 Pl"),
     ]
-    RIGHT_TABS = [("upnext", "Up Next"), ("lyrics", "Lyrics"), ("info", "Info")]
+    RIGHT_TABS = [("upnext", "Up Next"), ("lyrics", "Lyrics"), ("info", "Info"), ("downloads", "DL")]
+    CATALOG_SOURCES = ("ytm", "deezer", "itunes")
+    SEARCH_TYPES = ("songs", "albums", "artists", "playlists")
+    LOCAL_GROUP_MODES = ("flat", "artist", "album")
 
     def __init__(self, stdscr: curses.window, initial_query: str = "") -> None:
         self.stdscr = stdscr
@@ -264,17 +449,32 @@ class SovereignDashboard:
         self.search_focus = False
         self.search_loading = False
         self.search_seq = 0
+        self.browse_seq = 0
         self.show_help = False
+
+        cat_env = (os.environ.get("MUSICCTL_CATALOG") or "ytm").strip().lower()
+        self.catalog_source = cat_env if cat_env in self.CATALOG_SOURCES else "ytm"
+        self.search_type = "songs"
+        self.local_group_mode = "flat"
+        self.nav_stack: list[dict[str, Any]] = []
+        self.drill_title = ""
+        self.drill_ref = ""
+        self.drill_kind = ""
+        self._local_groups: dict[str, list[dict[str, Any]]] = {}
 
         self.tracks: list[tuple[str, str, str, str]] = []
         self.search_results: list[tuple[str, str, str, str]] = []
         self.selected_idx = 0
         self.scroll_top = 0
 
+        self.dl_manager = DownloadManager(self.bin_path, self.ui_events)
+        self.dl_jobs: list[dict[str, Any]] = []
+
         self.mpv_state: dict[str, Any] = {}
         self.eq_mode = os.environ.get("MUSICCTL_EQ", "flat")
         self.norm_on = os.environ.get("MUSICCTL_NORM", "0") == "1"
         self.quality_mode = os.environ.get("MUSICCTL_QUALITY", "cd")
+        self.autoplay_on = os.environ.get("MUSICCTL_AUTOPLAY", "0") == "1"
         self.sleep_rem = ""
         self.fav_ids: set[str] = set()
 
@@ -426,6 +626,13 @@ class SovereignDashboard:
                 if q_val in ("small", "cd", "hires", "ask"):
                     self.quality_mode = q_val
 
+        auto_state = self.data_dir / "autoplay.state"
+        auto_sig = self._file_sig(auto_state)
+        if auto_sig != sigs.get("auto", ...):
+            sigs["auto"] = auto_sig
+            if auto_sig is not None:
+                self.autoplay_on = auto_state.read_text(encoding="utf-8", errors="replace").strip() == "1"
+
         sleep_file = self.data_dir / "sleep.state"
         if sleep_file.is_file():
             try:
@@ -438,8 +645,160 @@ class SovereignDashboard:
         else:
             self.sleep_rem = ""
 
+    def cycle_catalog(self) -> str:
+        cur = getattr(self, "catalog_source", "ytm")
+        idx = self.CATALOG_SOURCES.index(cur) if cur in self.CATALOG_SOURCES else 0
+        nxt = self.CATALOG_SOURCES[(idx + 1) % len(self.CATALOG_SOURCES)]
+        self.catalog_source = nxt
+        return nxt
+
+    def cycle_search_type(self) -> str:
+        cur = getattr(self, "search_type", "songs")
+        idx = self.SEARCH_TYPES.index(cur) if cur in self.SEARCH_TYPES else 0
+        nxt = self.SEARCH_TYPES[(idx + 1) % len(self.SEARCH_TYPES)]
+        self.search_type = nxt
+        return nxt
+
+    def cycle_local_group(self) -> str:
+        cur = getattr(self, "local_group_mode", "flat")
+        idx = self.LOCAL_GROUP_MODES.index(cur) if cur in self.LOCAL_GROUP_MODES else 0
+        nxt = self.LOCAL_GROUP_MODES[(idx + 1) % len(self.LOCAL_GROUP_MODES)]
+        self.local_group_mode = nxt
+        self.nav_stack = []
+        self.drill_title = ""
+        self.drill_ref = ""
+        self.drill_kind = ""
+        if self.active_tab == "local":
+            self.selected_idx = 0
+            self.scroll_top = 0
+            self.load_tab_items()
+        return nxt
+
+    def push_nav(
+        self,
+        title: str,
+        tracks: list[tuple[str, str, str, str]],
+        context_ref: str = "",
+        kind: str = "browse",
+    ) -> None:
+        stack = getattr(self, "nav_stack", None)
+        if stack is None:
+            stack = []
+            self.nav_stack = stack
+        stack.append(
+            {
+                "tracks": list(self.tracks),
+                "selected_idx": self.selected_idx,
+                "scroll_top": self.scroll_top,
+                "drill_title": getattr(self, "drill_title", ""),
+                "drill_ref": getattr(self, "drill_ref", ""),
+                "drill_kind": getattr(self, "drill_kind", ""),
+            }
+        )
+        self.tracks = list(tracks)
+        self.selected_idx = 0
+        self.scroll_top = 0
+        self.drill_title = title
+        self.drill_ref = context_ref
+        self.drill_kind = kind
+
+    def pop_nav(self) -> bool:
+        stack = getattr(self, "nav_stack", None)
+        if not stack:
+            return False
+        frame = stack.pop()
+        self.tracks = list(frame.get("tracks") or [])
+        self.selected_idx = int(frame.get("selected_idx") or 0)
+        self.scroll_top = int(frame.get("scroll_top") or 0)
+        self.drill_title = str(frame.get("drill_title") or "")
+        self.drill_ref = str(frame.get("drill_ref") or "")
+        self.drill_kind = str(frame.get("drill_kind") or "")
+        return True
+
+    def load_playlists_list(self) -> list[tuple[str, str, str, str]]:
+        pl_dir = self.data_dir / "playlists"
+        rows: list[tuple[str, str, str, str]] = []
+        if pl_dir.is_dir():
+            for p in sorted(pl_dir.glob("*.tsv"), key=lambda x: x.name.lower()):
+                lines = [ln for ln in p.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+                rows.append((f"pl:{p.stem}", p.stem, f"{len(lines)} tracks", "[PL]"))
+        return rows
+
+    def load_local_grouped(self) -> list[tuple[str, str, str, str]]:
+        cache_file = self.cache_dir / "library.json"
+        entries = library.scan_library(self.download_dir, cache_file)
+        mode = getattr(self, "local_group_mode", "flat")
+        groups_map: dict[str, list[dict[str, Any]]] = {}
+        self._local_groups = groups_map
+
+        if mode == "artist":
+            rows: list[tuple[str, str, str, str]] = []
+            for g in library.group_by_artist(entries):
+                key = f"lart:{g['artist']}"
+                groups_map[key] = g["tracks"]
+                rows.append((key, g["artist"], f"{len(g['tracks'])} tracks", "[L-ART]"))
+            return rows
+
+        if mode == "album":
+            rows = []
+            for g in library.group_by_album(entries):
+                key = f"lalb:{g['album']}"
+                groups_map[key] = g["tracks"]
+                rows.append((key, g["album"], f"{g['artist']} • {len(g['tracks'])} tracks", "[L-ALB]"))
+            return rows
+
+        rows = []
+        for e in entries:
+            artist = str(e.get("artist") or "").strip()
+            title = str(e.get("title") or e.get("filename") or "")
+            disp = f"{artist} - {title}" if artist and title else title
+            meta_parts = [p for p in (str(e.get("album") or "").strip(), str(e.get("codec") or "").strip()) if p]
+            rows.append((str(e.get("path") or ""), disp, " • ".join(meta_parts) or "Local Audio", "[LOC]"))
+        return rows
+
+    def _catalog_entity_to_row(self, ent: dict[str, Any]) -> tuple[str, str, str, str]:
+        src = str(ent.get("source") or "ytm").lower()
+        etype = str(ent.get("type") or "song").lower()
+        eid = str(ent.get("id") or "")
+        title = str(ent.get("title") or eid)
+        artist = str(ent.get("artist") or "")
+        album = str(ent.get("album") or "")
+        dur = int(ent.get("duration") or 0)
+        year = int(ent.get("year") or 0)
+
+        parts: list[str] = []
+        if artist:
+            parts.append(artist)
+        if album and etype == "song":
+            parts.append(album)
+        elif year > 0 and etype == "album":
+            parts.append(str(year))
+        if dur > 0:
+            parts.append(format_mmss(dur))
+
+        if etype == "song":
+            row_id = eid if src == "ytm" else catalog.format_ref(src, "song", eid)
+            tag = f"[{src.upper()}]"
+        elif etype == "album":
+            row_id = catalog.format_ref(src, "album", eid)
+            tag = "[ALB]"
+        elif etype == "artist":
+            row_id = catalog.format_ref(src, "artist", eid)
+            tag = "[ART]"
+        else:
+            row_id = catalog.format_ref(src, "playlist", eid)
+            tag = "[PL]"
+        return (row_id, title, " • ".join(parts), tag)
+
     def load_tab_items(self) -> None:
         self.refresh_local_files_meta()
+        if getattr(self, "nav_stack", None):
+            if self.selected_idx >= len(self.tracks):
+                self.selected_idx = max(0, len(self.tracks) - 1)
+            if self.scroll_top > self.selected_idx:
+                self.scroll_top = self.selected_idx
+            return
+
         if self.active_tab == "home":
             favs = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
             hist = self.read_tsv(self.data_dir / "history.tsv", "[HIS]")
@@ -467,13 +826,9 @@ class SovereignDashboard:
                 qitems.append((vid, title, f"#{idx + 1} • {state_lbl}", "[Q]"))
             self.tracks = qitems
         elif self.active_tab == "local":
-            exts = {".opus", ".mp3", ".m4a", ".flac", ".ogg", ".wav"}
-            loc: list[tuple[str, str, str, str]] = []
-            if self.download_dir.is_dir():
-                for p in sorted(self.download_dir.rglob("*")):
-                    if p.is_file() and p.suffix.lower() in exts:
-                        loc.append((str(p), p.name, "Local Audio", "[LOC]"))
-            self.tracks = loc
+            self.tracks = self.load_local_grouped()
+        elif self.active_tab == "playlists":
+            self.tracks = self.load_playlists_list()
 
         if self.selected_idx >= len(self.tracks):
             self.selected_idx = max(0, len(self.tracks) - 1)
@@ -501,12 +856,60 @@ class SovereignDashboard:
                 if ok:
                     self.search_results = rows
                     if self.active_tab == "search":
+                        self.nav_stack = []
+                        self.drill_title = ""
+                        self.drill_ref = ""
+                        self.drill_kind = ""
                         self.selected_idx = 0
                         self.scroll_top = 0
                         self.load_tab_items()
                     self.set_toast(f"Found {len(rows)} tracks")
                 else:
                     self.set_toast("Search failed")
+            elif kind == "browse_done":
+                bseq, title, ref, rows, ok = payload
+                if bseq != getattr(self, "browse_seq", 0):
+                    continue
+                if ok and rows:
+                    self.push_nav(title, rows, context_ref=ref, kind="browse")
+                    self.set_toast(f"Opened {title[:22]} ({len(rows)})")
+                elif ok:
+                    self.set_toast(f"Empty: {title[:24]}")
+                else:
+                    self.set_toast(f"Browse failed: {title[:20]}")
+            elif kind == "dl_event":
+                ev = dict(payload) if isinstance(payload, dict) else {}
+                jobs = getattr(self, "dl_jobs", None)
+                if jobs is None:
+                    jobs = []
+                    self.dl_jobs = jobs
+                cid = str(ev.pop("_client_id", "") or "")
+                jid = str(ev.get("job_id") or "")
+                if cid and jid and cid != jid:
+                    jobs[:] = [j for j in jobs if j.get("job_id") != cid]
+                title = str(ev.get("title") or "download")
+                status = str(ev.get("status") or "running")
+                pct = int(ev.get("pct") or 0)
+                idx = next((i for i, j in enumerate(jobs) if j.get("job_id") == jid and (not title or j.get("title") == title)), None)
+                if idx is None and jid.startswith("dlm-"):
+                    idx = next((i for i, j in enumerate(jobs) if j.get("job_id") == jid), None)
+                if idx is not None:
+                    jobs[idx].update(ev)
+                else:
+                    jobs.append(ev)
+                    if len(jobs) > 20:
+                        del jobs[:-20]
+                if status == "done":
+                    self.set_toast(f"DL Done: {title[:24]}")
+                    if self.active_tab == "local" and not getattr(self, "nav_stack", None):
+                        self.load_tab_items()
+                elif status == "skipped":
+                    self.set_toast(f"DL Cached: {title[:22]}")
+                elif status == "error":
+                    err = str(ev.get("error") or "failed")
+                    self.set_toast(f"DL Err: {err[:24]}")
+                elif pct > 0:
+                    self.set_toast(f"DL {pct}%: {title[:22]}")
             elif kind == "lyrics_done":
                 track_key, header, lines = payload
                 if track_key != self.lyrics_track_key:
@@ -556,32 +959,69 @@ class SovereignDashboard:
         if not q:
             return
         self.active_tab = "search"
+        self.nav_stack = []
+        self.drill_title = ""
+        self.drill_ref = ""
+        self.drill_kind = ""
         self.search_loading = True
         self.search_focus = False
         self.search_seq += 1
         seq = self.search_seq
-        self.set_toast(f"Searching: {q[:24]}...")
+        cat_src = getattr(self, "catalog_source", "ytm")
+        stype = getattr(self, "search_type", "songs")
+        self.set_toast(f"Searching {cat_src}/{stype}: {q[:18]}...")
 
         def worker() -> None:
             rows: list[tuple[str, str, str, str]] = []
             ok = False
             try:
                 proc = subprocess.run(
-                    [self.bin_path, "search", q],
+                    [self.bin_path, "search", "--catalog", cat_src, "--type", stype, "--json", q],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     timeout=15,
                 )
-                for ln in proc.stdout.splitlines():
-                    parts = ln.split("\t")
-                    if len(parts) >= 2 and parts[0]:
-                        rows.append((parts[0], parts[1], parts[2] if len(parts) > 2 else "", "[YTM]"))
-                ok = True
+                if proc.returncode == 0 and proc.stdout.strip():
+                    items = json.loads(proc.stdout)
+                    if isinstance(items, list):
+                        for ent in items:
+                            if isinstance(ent, dict) and ent.get("id"):
+                                rows.append(self._catalog_entity_to_row(ent))
+                        ok = True
             except Exception:
                 ok = False
             finally:
                 self.ui_events.put(("search_done", (seq, rows, ok)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def trigger_browse(self, ref: str, title: str) -> None:
+        self.browse_seq = getattr(self, "browse_seq", 0) + 1
+        bseq = self.browse_seq
+        self.set_toast(f"Loading {title[:24]}...")
+
+        def worker() -> None:
+            rows: list[tuple[str, str, str, str]] = []
+            ok = False
+            try:
+                proc = subprocess.run(
+                    [self.bin_path, "browse", "--json", ref],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    data = json.loads(proc.stdout)
+                    for it in data.get("items") or []:
+                        if isinstance(it, dict) and it.get("id"):
+                            rows.append(self._catalog_entity_to_row(it))
+                    ok = True
+            except Exception:
+                ok = False
+            finally:
+                self.ui_events.put(("browse_done", (bseq, title, ref, rows, ok)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -638,11 +1078,12 @@ class SovereignDashboard:
         threading.Thread(target=worker, daemon=True).start()
 
     def fetch_lyrics_async(self, title: str, track_key: str, artist: str = "", duration: float = 0.0) -> None:
-        if not title.strip():
+        clean_title = normalize_track_title(title)
+        if not clean_title.strip():
             return
         self.lyrics_track_key = track_key
         self.lyrics_loading = True
-        lbl = f"{title} - {artist}" if artist else title
+        lbl = f"{clean_title} - {artist}" if artist else clean_title
         self.lyrics_header = f"Loading lyrics: {lbl[:36]}..."
         self.lyrics_lines = []
 
@@ -655,7 +1096,7 @@ class SovereignDashboard:
 
                 # 1. Exact /api/get match when artist metadata is available
                 if artist:
-                    params: dict[str, str] = {"track_name": title, "artist_name": artist}
+                    params: dict[str, str] = {"track_name": clean_title, "artist_name": artist}
                     if duration > 0:
                         params["duration"] = str(int(round(duration)))
                     get_url = "https://lrclib.net/api/get?" + urllib.parse.urlencode(params)
@@ -670,42 +1111,42 @@ class SovereignDashboard:
 
                 # 2. Structured /api/search?track_name=&artist_name=
                 if chosen is None and artist:
-                    s_url = "https://lrclib.net/api/search?" + urllib.parse.urlencode({"track_name": title, "artist_name": artist})
+                    s_url = "https://lrclib.net/api/search?" + urllib.parse.urlencode({"track_name": clean_title, "artist_name": artist})
                     req = urllib.request.Request(s_url, headers=headers)
                     with urllib.request.urlopen(req, timeout=5.0) as resp:
                         items = json.loads(resp.read().decode("utf-8", errors="replace"))
                     if isinstance(items, list):
-                        chosen = pick_best_lyrics_candidate(items, title, artist, duration)
+                        chosen = pick_best_lyrics_candidate(items, clean_title, artist, duration)
 
                 # 3. Fallback /api/search?q= with strict artist+duration scoring
                 if chosen is None:
-                    q_str = f"{artist} {title}".strip() if artist else title
+                    q_str = f"{artist} {clean_title}".strip() if artist else clean_title
                     q_url = "https://lrclib.net/api/search?" + urllib.parse.urlencode({"q": q_str})
                     req = urllib.request.Request(q_url, headers=headers)
                     with urllib.request.urlopen(req, timeout=5.0) as resp:
                         items = json.loads(resp.read().decode("utf-8", errors="replace"))
                     if isinstance(items, list):
-                        chosen = pick_best_lyrics_candidate(items, title, artist, duration)
+                        chosen = pick_best_lyrics_candidate(items, clean_title, artist, duration)
 
                 if not chosen:
-                    if artist and title:
+                    if artist and clean_title:
                         try:
                             fb_url = (
                                 "https://api.lyrics.ovh/v1/"
                                 + urllib.parse.quote(artist)
                                 + "/"
-                                + urllib.parse.quote(title)
+                                + urllib.parse.quote(clean_title)
                             )
                             req = urllib.request.Request(fb_url, headers=headers)
                             with urllib.request.urlopen(req, timeout=3.0) as resp:
                                 fb_raw = resp.read().decode("utf-8", errors="replace")
-                            fb_res = parse_fallback_lyrics_json(fb_raw, title, artist)
+                            fb_res = parse_fallback_lyrics_json(fb_raw, clean_title, artist)
                             if fb_res is not None:
                                 header, lines = fb_res
                         except Exception:
                             pass
                 else:
-                    t_name = chosen.get("trackName") or title
+                    t_name = chosen.get("trackName") or clean_title
                     a_name = chosen.get("artistName") or artist
                     header = f"{t_name} - {a_name} [LRCLIB]".strip(" -")
                     synced = (chosen.get("syncedLyrics") or "").strip()
@@ -851,7 +1292,7 @@ class SovereignDashboard:
 
     def render_header(self, w: int) -> None:
         self.safe_addstr(0, 0, " " * w, curses.color_pair(PAIR_PILL_BTN))
-        brand = " MUSICCTL v2.1 "
+        brand = " MUSICCTL v2.2 "
         self.safe_addstr(0, 0, brand, curses.color_pair(PAIR_PILL_ACTIVE) | curses.A_BOLD)
         cx = len(brand) + 1
         for key, lbl in self.TABS:
@@ -882,11 +1323,24 @@ class SovereignDashboard:
 
     def render_search_bar(self, w: int) -> None:
         self.safe_addstr(1, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
-        self.safe_addstr(1, 1, "Search:", curses.color_pair(PAIR_ICE) | curses.A_BOLD)
+        cx = 1
+        cat_src = getattr(self, "catalog_source", "ytm")
+        stype = getattr(self, "search_type", "songs")
+        cx = self.draw_button(1, cx, f"Cat:{cat_src}", "cycle_catalog", None, active=(cat_src != "ytm"))
+        if w >= 112:
+            for scope_k, scope_lbl in (("songs", "Songs"), ("albums", "Albums"), ("artists", "Artists"), ("playlists", "Lists")):
+                attr = curses.color_pair(PAIR_PILL_ACTIVE if stype == scope_k else PAIR_PILL_BTN) | curses.A_BOLD
+                btn = f"[{scope_lbl}]"
+                self.safe_addstr(1, cx, btn, attr)
+                self.add_hitbox(cx, 1, cx + len(btn), 2, "set_search_type", scope_k)
+                cx += len(btn) + 1
+        else:
+            cx = self.draw_button(1, cx, f"Type:{stype}", "cycle_search_type", None, active=(stype != "songs"))
+
         btn_search_w = 8
         btn_clear_w = 7
-        box_x = 9
-        box_w = max(12, w - box_x - btn_search_w - btn_clear_w - 5)
+        box_x = cx
+        box_w = max(10, w - box_x - btn_search_w - btn_clear_w - 4)
         cursor_ch = "_" if self.search_focus else ""
         inner = truncate_width(self.search_query + cursor_ch, max(1, box_w - 2))
         box_txt = " " + inner + " " * max(0, box_w - 1 - display_width(inner))
@@ -901,9 +1355,34 @@ class SovereignDashboard:
 
     def render_left_pane(self, y0: int, h: int, x0: int, w: int) -> None:
         self.safe_addstr(y0, x0, "╭" + "─" * max(0, w - 2) + "╮", curses.color_pair(PAIR_BOX))
-        tab_title = dict(self.TABS).get(self.active_tab, self.active_tab.upper())
-        hdr = f" {tab_title} ({len(self.tracks)}) "
-        self.safe_addstr(y0, x0 + 2, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+        stack = getattr(self, "nav_stack", [])
+        if stack:
+            bx = x0 + 2
+            bx = self.draw_button(y0, bx, "<- Back", "nav_back", None)
+            title_lbl = truncate_width(getattr(self, "drill_title", "") or "Items", max(8, w - bx - 26))
+            hdr = f" {title_lbl} ({len(self.tracks)}) "
+            self.safe_addstr(y0, bx, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            ax = bx + display_width(hdr) + 1
+            if ax + 24 < x0 + w - 1:
+                ax = self.draw_button(y0, ax, "Play All", "play_all", None)
+                ax = self.draw_button(y0, ax, "+Q All", "add_all", None)
+                ax = self.draw_button(y0, ax, "DL All", "dl_all", None)
+                if getattr(self, "drill_kind", "") == "playlist" and ax + 7 < x0 + w - 1:
+                    self.draw_button(y0, ax, "Sync", "sync_pl", None)
+        else:
+            tab_title = dict(self.TABS).get(self.active_tab, self.active_tab.upper())
+            hdr = f" {tab_title} ({len(self.tracks)}) "
+            self.safe_addstr(y0, x0 + 2, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            if self.active_tab == "local":
+                lmode = getattr(self, "local_group_mode", "flat")
+                lbl = "Artists" if lmode == "artist" else ("Albums" if lmode == "album" else "Flat")
+                lx = x0 + 2 + display_width(hdr) + 1
+                if lx + len(lbl) + 4 < x0 + w - 1:
+                    self.draw_button(y0, lx, lbl, "cycle_local_group", None, active=(lmode != "flat"))
+            elif self.active_tab == "playlists" and self.tracks:
+                px = x0 + 2 + display_width(hdr) + 1
+                if px + 7 < x0 + w - 1:
+                    self.draw_button(y0, px, "Sync", "sync_pl", None)
 
         body_h = max(1, h - 2)
         if self.selected_idx < self.scroll_top:
@@ -985,7 +1464,9 @@ class SovereignDashboard:
         info_w = max(8, x0 + w - 2 - info_x)
         if not idle:
             title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "Unknown")
-            artist = extract_primary_artist(self.mpv_state.get("metadata"))
+            meta_fields = extract_metadata_fields(self.mpv_state.get("metadata"))
+            artist = meta_fields["artist"]
+            alb_lbl = format_album_line(meta_fields["album"], meta_fields["year"])
             codec = str(self.mpv_state.get("audio-codec-name") or "-")
             srate = self.mpv_state.get("audio-params/samplerate") or 0
             sfmt = str(self.mpv_state.get("audio-params/format") or "")
@@ -998,7 +1479,11 @@ class SovereignDashboard:
             self.safe_addstr(y0 + 1, info_x, truncate_width(title, info_w), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
             row_off = 2
             if artist:
-                self.safe_addstr(y0 + row_off, info_x, truncate_width(f"by {artist}", info_w), curses.color_pair(PAIR_PURPLE) | curses.A_BOLD)
+                art_txt = f"by {artist}" if (not alb_lbl or top_h >= 10) else f"by {artist} • {alb_lbl}"
+                self.safe_addstr(y0 + row_off, info_x, truncate_width(art_txt, info_w), curses.color_pair(PAIR_PURPLE) | curses.A_BOLD)
+                row_off += 1
+            if alb_lbl and (top_h >= 10 or not artist) and row_off < top_h - 3:
+                self.safe_addstr(y0 + row_off, info_x, truncate_width(f"Album: {alb_lbl}", info_w), curses.color_pair(PAIR_ICE))
                 row_off += 1
             self.safe_addstr(y0 + row_off, info_x, truncate_width(f"Audio: {audio_lbl}  |  Queue: {qpos}/{qcnt}", info_w), curses.color_pair(PAIR_CYAN))
             row_off += 1
@@ -1090,17 +1575,45 @@ class SovereignDashboard:
                     if is_cur_l:
                         attr |= curses.A_BOLD
                     self.safe_addstr(by0 + 2 + row_i, x0 + 2, truncate_width(prefix + ltxt, b_inner_w), attr)
+        elif self.right_tab == "downloads":
+            jobs = list(reversed(getattr(self, "dl_jobs", [])))
+            if not jobs:
+                self.safe_addstr(by0 + 1, x0 + 2, truncate_width("No active or recent downloads.", b_inner_w), curses.color_pair(PAIR_DIM))
+            else:
+                if b_inner_h >= 2:
+                    self.draw_button(by0 + 1, x0 + 2, "Cancel All", "dl_cancel", None)
+                for row_i in range(max(0, b_inner_h - 1)):
+                    if row_i >= len(jobs):
+                        break
+                    j = jobs[row_i]
+                    st = str(j.get("status") or "running")
+                    pct = int(j.get("pct") or 0)
+                    badge = f"[DONE]" if st == "done" else ("[SKIP]" if st == "skipped" else ("[ERR]" if st == "error" else f"[{pct:3d}%]"))
+                    pair_j = PAIR_GREEN if st == "done" else (PAIR_DIM if st == "skipped" else (PAIR_RED if st == "error" else PAIR_CYAN))
+                    line = truncate_width(f"{badge} {j.get('title') or ''} ({j.get('stage') or ''})", b_inner_w)
+                    self.safe_addstr(by0 + 2 + row_i, x0 + 2, line, curses.color_pair(pair_j))
         else:
             if self.tracks and 0 <= self.selected_idx < len(self.tracks):
                 svid, stitle, smeta, stag = self.tracks[self.selected_idx]
+                if not idle and svid and (svid == cur_vid or svid == cur_path):
+                    mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+                    sel_alb = format_album_line(mf["album"], mf["year"])
+                else:
+                    sel_alb = extract_album_from_meta(smeta)
                 self.safe_addstr(by0 + 1, x0 + 2, truncate_width(f"Title: {stitle}", b_inner_w), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
-                if b_inner_h >= 2:
-                    self.safe_addstr(by0 + 2, x0 + 2, truncate_width(f"Info : {smeta or '-'}", b_inner_w), curses.color_pair(PAIR_ICE))
-                if b_inner_h >= 3:
-                    self.safe_addstr(by0 + 3, x0 + 2, truncate_width(f"ID   : {svid} {stag}", b_inner_w), curses.color_pair(PAIR_PURPLE))
-                if b_inner_h >= 5:
+                r_off = 2
+                if sel_alb and b_inner_h >= 6:
+                    self.safe_addstr(by0 + r_off, x0 + 2, truncate_width(f"Album: {sel_alb}", b_inner_w), curses.color_pair(PAIR_ICE))
+                    r_off += 1
+                if b_inner_h >= r_off:
+                    self.safe_addstr(by0 + r_off, x0 + 2, truncate_width(f"Info : {smeta or '-'}", b_inner_w), curses.color_pair(PAIR_ICE))
+                    r_off += 1
+                if b_inner_h >= r_off:
+                    self.safe_addstr(by0 + r_off, x0 + 2, truncate_width(f"ID   : {svid} {stag}", b_inner_w), curses.color_pair(PAIR_PURPLE))
+                    r_off += 1
+                if b_inner_h >= r_off + 1:
                     ax = x0 + 2
-                    ay = by0 + 4
+                    ay = by0 + r_off
                     ax = self.draw_button(ay, ax, "Play", "play_sel")
                     ax = self.draw_button(ay, ax, "+Queue", "add_sel")
                     ax = self.draw_button(ay, ax, "~Radio", "radio_sel")
@@ -1108,10 +1621,10 @@ class SovereignDashboard:
                         ax = self.draw_button(ay, ax, "*Fav", "fav_sel")
                     if ax + 11 < x0 + w - 1:
                         ax = self.draw_button(ay, ax, "Download", "dl_sel")
-                    if stag == "[Q]" and b_inner_h >= 6:
+                    if stag == "[Q]" and b_inner_h >= r_off + 2:
                         qx = x0 + 2
-                        qx = self.draw_button(by0 + 5, qx, "Move Up", "q_up")
-                        self.draw_button(by0 + 5, qx, "Move Down", "q_down")
+                        qx = self.draw_button(ay + 1, qx, "Move Up", "q_up")
+                        self.draw_button(ay + 1, qx, "Move Down", "q_down")
             else:
                 self.safe_addstr(by0 + 1, x0 + 2, "No track selected", curses.color_pair(PAIR_DIM))
 
@@ -1183,6 +1696,8 @@ class SovereignDashboard:
         dx = self.draw_button(y0 + 3, dx, f"Q:{self.quality_mode}", "quality", active=(self.quality_mode != "cd"))
         dx = self.draw_button(y0 + 3, dx, f"EQ:{self.eq_mode}", "eq", active=(self.eq_mode != "flat"))
         dx = self.draw_button(y0 + 3, dx, f"Norm:{'on' if self.norm_on else 'off'}", "norm", active=self.norm_on)
+        if dx + 12 < w:
+            dx = self.draw_button(y0 + 3, dx, f"Auto:{'on' if self.autoplay_on else 'off'}", "autoplay", active=self.autoplay_on)
         dx = self.draw_button(y0 + 3, dx, "Mute" if not muted else "UNMUTE", "mute", active=muted, pair=PAIR_RED if muted else PAIR_PILL_BTN)
         dx = self.draw_button(y0 + 3, dx, "? Help", "help", active=self.show_help)
 
@@ -1193,11 +1708,11 @@ class SovereignDashboard:
 
     def render_help_modal(self, h: int, w: int) -> None:
         lines = [
-            "MUSICCTL v2.1 - CONTROLS",
+            "MUSICCTL v2.2 - CONTROLS",
             "",
             "Mouse:",
-            "  Click track row       Select track",
-            "  Double-click row      Play / Jump in Queue",
+            "  Click track row       Select / Drill down",
+            "  Double-click row      Play / Open container",
             "  Right-click row       Enqueue track",
             "  Click progress bar    Seek to timestamp",
             "  Click volume bar      Set volume level",
@@ -1205,10 +1720,11 @@ class SovereignDashboard:
             "  Mouse wheel           Scroll track list",
             "",
             "Keyboard:",
-            "  / or Ctrl-S   Focus search   |  1-6  Switch tabs",
+            "  / or Ctrl-S   Focus search   |  1-7  Switch tabs",
+            "  C Cat  T Type  L LocalGroup  |  Backspace  Back",
             "  j/k or Arrows Move cursor    |  J/K  Reorder queue track",
-            "  Enter Play/Jump  a Enqueue   |  f Fav  r Radio  d Download",
-            "  Space Pause/Play  n/b Next/Prev  o Loop  u Shuf  Q Quality",
+            "  Enter Play/Open  a Enqueue   |  f Fav  r Radio  d Download",
+            "  Space Pause/Play  n/b Next/Prev  o Loop  u Shuf  Q Quality  A Auto",
             "  e Cycle EQ  N Norm  m Mute   |  +/- Vol  [/] Seek",
             "  ? Toggle help  q Quit TUI (daemon stays alive)",
         ]
@@ -1254,10 +1770,41 @@ class SovereignDashboard:
             self.render_help_modal(h, w)
         self.stdscr.refresh()
 
+    def _local_group_to_rows(self, key: str) -> list[tuple[str, str, str, str]]:
+        tracks = getattr(self, "_local_groups", {}).get(key) or []
+        rows: list[tuple[str, str, str, str]] = []
+        for e in tracks:
+            artist = str(e.get("artist") or "").strip()
+            title = str(e.get("title") or e.get("filename") or "")
+            trk = int(e.get("track") or 0)
+            disp = f"{trk:02d}. {title}" if trk > 0 else title
+            meta_parts = [p for p in (artist, str(e.get("album") or "").strip(), str(e.get("codec") or "").strip()) if p]
+            rows.append((str(e.get("path") or ""), disp, " • ".join(meta_parts) or "Local Audio", "[LOC]"))
+        return rows
+
+    def _collect_track_refs(self) -> list[str]:
+        refs: list[str] = []
+        for vid, _t, _m, tag in self.tracks:
+            if vid and tag not in ("[ALB]", "[ART]", "[PL]", "[L-ART]", "[L-ALB]"):
+                refs.append(vid)
+        return refs
+
     def play_selected(self) -> None:
         if not self.tracks or self.selected_idx >= len(self.tracks):
             return
         vid, title, meta, tag = self.tracks[self.selected_idx]
+        if tag in ("[L-ART]", "[L-ALB]"):
+            rows = self._local_group_to_rows(vid)
+            self.push_nav(title, rows, context_ref=vid, kind="local_group")
+            return
+        if vid.startswith("pl:"):
+            pl_name = vid[3:]
+            rows = self.read_tsv(self.data_dir / "playlists" / f"{pl_name}.tsv", "[PL]")
+            self.push_nav(pl_name, rows, context_ref=vid, kind="playlist")
+            return
+        if tag in ("[ALB]", "[ART]", "[PL]") or re.match(r"^(?:ytm|deezer|itunes):(?:album|artist|playlist):", vid):
+            self.trigger_browse(vid, title)
+            return
         if tag == "[Q]":
             self.mpv.send(["set_property", "playlist-pos", self.selected_idx])
             self.mpv.send(["set_property", "pause", False])
@@ -1280,9 +1827,71 @@ class SovereignDashboard:
         if action == "tab":
             self.search_focus = False
             self.active_tab = payload
+            self.nav_stack = []
+            self.drill_title = ""
+            self.drill_ref = ""
+            self.drill_kind = ""
             self.selected_idx = 0
             self.scroll_top = 0
             self.load_tab_items()
+        elif action == "cycle_catalog":
+            nxt = self.cycle_catalog()
+            self.set_toast(f"Catalog: {nxt}")
+        elif action == "cycle_search_type":
+            nxt = self.cycle_search_type()
+            self.set_toast(f"Type: {nxt}")
+        elif action == "set_search_type":
+            if payload in self.SEARCH_TYPES:
+                self.search_type = payload
+                self.set_toast(f"Type: {payload}")
+        elif action == "cycle_local_group":
+            nxt = self.cycle_local_group()
+            self.set_toast(f"Local view: {nxt}")
+        elif action == "nav_back":
+            self.pop_nav()
+        elif action == "play_all":
+            ctx = getattr(self, "drill_ref", "")
+            refs = self._collect_track_refs()
+            if ctx and not ctx.startswith(("lart:", "lalb:")):
+                self.run_cli_async(["play", ctx], toast=f"Playing {self.drill_title[:20]}", reload_after=True)
+            elif refs:
+                self.run_cli_async(["play", refs[0]], toast=f"Playing {len(refs)} tracks", reload_after=True)
+                for r in refs[1:]:
+                    self.run_cli_async(["add", r], reload_after=False)
+        elif action == "add_all":
+            ctx = getattr(self, "drill_ref", "")
+            refs = self._collect_track_refs()
+            if ctx and not ctx.startswith(("lart:", "lalb:")):
+                self.run_cli_async(["add", ctx], toast=f"Queued {self.drill_title[:20]}", reload_after=True)
+            elif refs:
+                for r in refs:
+                    self.run_cli_async(["add", r], reload_after=(r == refs[-1]))
+                self.set_toast(f"Queued {len(refs)} tracks")
+        elif action == "dl_all":
+            ctx = getattr(self, "drill_ref", "")
+            if ctx and not ctx.startswith(("lart:", "lalb:")) and getattr(self, "dl_manager", None):
+                self.dl_manager.start([ctx], label=self.drill_title or ctx)
+                self.right_tab = "downloads"
+        elif action == "sync_pl":
+            target = ""
+            if getattr(self, "drill_kind", "") == "playlist" and getattr(self, "drill_ref", "").startswith("pl:"):
+                target = self.drill_ref
+            elif self.active_tab == "playlists" and self.tracks and 0 <= self.selected_idx < len(self.tracks):
+                cand = self.tracks[self.selected_idx][0]
+                if cand.startswith("pl:"):
+                    target = cand
+            if target:
+                pl_name = target[3:]
+                if getattr(self, "dl_manager", None):
+                    self.dl_manager.start(["sync", target], label=f"Sync {pl_name}")
+                    self.right_tab = "downloads"
+                    self.set_toast(f"Syncing {pl_name}...")
+                else:
+                    self.run_cli_async(["dl", "sync", target], toast=f"Synced {pl_name}", reload_after=True, timeout=300.0)
+        elif action == "dl_cancel":
+            if getattr(self, "dl_manager", None):
+                self.dl_manager.cancel_all()
+                self.set_toast("Cancelling downloads...")
         elif action == "rtab":
             self.right_tab = payload
             if payload == "lyrics":
@@ -1348,6 +1957,8 @@ class SovereignDashboard:
             self.move_queue_selected(1)
         elif action == "norm":
             self.run_cli_async(["norm", "toggle"], toast="Norm toggled", reload_after=True)
+        elif action == "autoplay":
+            self.run_cli_async(["autoplay", "toggle"], toast="Autoplay toggled", reload_after=True)
         elif action == "mute":
             self.run_cli_async(["mute"], toast="Mute toggled", reload_after=True)
         elif action == "help":
@@ -1373,9 +1984,13 @@ class SovereignDashboard:
                     self.run_cli_async(["fav", "add", vid, title, meta], toast="Added favorite", reload_after=True)
         elif action == "dl_sel":
             if self.tracks and self.selected_idx < len(self.tracks):
-                vid = self.tracks[self.selected_idx][0]
-                self.set_toast(f"Downloading ({self.quality_mode})...")
-                self.run_cli_async(["download", vid], toast="Download complete", reload_after=True, timeout=300.0)
+                vid, title, _m, _t = self.tracks[self.selected_idx]
+                if getattr(self, "dl_manager", None):
+                    self.dl_manager.start([vid], label=title or vid)
+                    self.set_toast(f"Downloading ({self.quality_mode}): {title[:20]}")
+                else:
+                    self.set_toast(f"Downloading ({self.quality_mode})...")
+                    self.run_cli_async(["download", vid], toast="Download complete", reload_after=True, timeout=300.0)
 
     def move_queue_selected(self, delta: int) -> None:
         if self.active_tab != "queue" or not self.tracks:
@@ -1496,6 +2111,8 @@ class SovereignDashboard:
                 self.handle_action("quality", None)
             elif ch == ord("N"):
                 self.handle_action("norm", None)
+            elif ch == ord("A"):
+                self.handle_action("autoplay", None)
             elif ch == ord("m"):
                 self.handle_action("mute", None)
             elif ch == ord("x"):
@@ -1508,7 +2125,17 @@ class SovereignDashboard:
                 self.mpv.send(["seek", -10, "relative"])
             elif ch == ord("]"):
                 self.mpv.send(["seek", 10, "relative"])
-            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                self.pop_nav()
+            elif ch == ord("C"):
+                self.handle_action("cycle_catalog", None)
+            elif ch == ord("T"):
+                self.handle_action("cycle_search_type", None)
+            elif ch == ord("L"):
+                self.handle_action("cycle_local_group", None)
+            elif ch == ord("S") and (self.active_tab == "playlists" or getattr(self, "drill_kind", "") == "playlist"):
+                self.handle_action("sync_pl", None)
+            elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
                 idx = ch - ord("1")
                 self.handle_action("tab", self.TABS[idx][0])
             elif ch == 9:  # Tab cycles right sub-tabs

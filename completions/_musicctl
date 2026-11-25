@@ -5,9 +5,10 @@ _musicctl() {
   commands=(
     'tui:Launch interactive clickable Sovereign Dashboard'
     'fzf:Launch legacy fzf TUI cockpit with realtime preview'
-    'play:Resolve track or local file and play immediately'
-    'add:Resolve track or local file and append to queue'
-    'search:Search YouTube Music via InnerTube'
+    'play:Resolve track, album/playlist ref, or file and play'
+    'add:Resolve track, album/playlist ref, or file and enqueue'
+    'search:Search catalogs (ytm|deezer|itunes)'
+    'browse:Browse album, artist, or playlist entity'
     'radio:Queue YTM Up Next Radio mix'
     'toggle:Toggle play/pause'
     'pause:Toggle play/pause'
@@ -23,6 +24,7 @@ _musicctl() {
     'quality:Set audio quality tier and provider priority'
     'eq:Set parametric EQ preset'
     'norm:Toggle EBU R128 loudness normalization'
+    'autoplay:Toggle infinite Up Next Radio autoplay'
     'speed:Set playback speed'
     'vol:Set or adjust volume'
     'seek:Relative seek in seconds'
@@ -31,7 +33,7 @@ _musicctl() {
     'lyrics:Fetch lyrics via LRCLIB'
     'download:Download audio offline (FLAC/M4A/Opus)'
     'dl:Download audio offline (FLAC/M4A/Opus)'
-    'local:List downloaded local audio files'
+    'local:List/search local audio library (flat|artist|album)'
     'pl:Manage named local playlists'
     'sleep:Set or cancel auto-stop sleep timer'
     'resume:Restore saved queue and playback position'
@@ -95,11 +97,41 @@ _musicctl() {
     norm)
       _values 'action' on off toggle status
       ;;
+    search)
+      if [[ "$words[CURRENT-1]" == "--catalog" || "$words[CURRENT-1]" == "-c" ]]; then
+        _values 'catalog' ytm deezer itunes
+      elif [[ "$words[CURRENT-1]" == "--type" || "$words[CURRENT-1]" == "-t" ]]; then
+        _values 'type' songs albums artists playlists
+      elif [[ "$words[CURRENT]" == -* ]]; then
+        _values 'option' --catalog --type --json
+      fi
+      ;;
+    browse)
+      if [[ "$words[CURRENT]" == -* ]]; then
+        _values 'option' --json --tsv
+      fi
+      ;;
+    autoplay)
+      _values 'action' on off toggle status
+      ;;
+    local)
+      if [[ "$words[CURRENT-1]" == "--by" ]]; then
+        _values 'group' flat artist album
+      elif [[ "$words[CURRENT]" == -* ]]; then
+        _values 'option' --by --rescan --json
+      fi
+      ;;
     dl|download)
       if [[ "$words[CURRENT-1]" == "--quality" || "$words[CURRENT-1]" == "-q" ]]; then
         _values 'tier' small cd hires ask
+      elif [[ "$words[CURRENT-1]" == "--format" || "$words[CURRENT-1]" == "-f" ]]; then
+        _values 'format' auto flac opus m4a mp3
+      elif [[ "$words[CURRENT-1]" == "--jobs" || "$words[CURRENT-1]" == "-j" ]]; then
+        _values 'jobs' 1 2 3 4
       elif [[ "$words[CURRENT]" == -* ]]; then
-        _values 'option' --quality -q
+        _values 'option' --quality -q --format -f --jobs -j --template -t --lrc --replaygain --force --dry-run --prune --jsonl --json
+      else
+        _values 'subcommand' sync status cancel current
       fi
       ;;
     play|add)
