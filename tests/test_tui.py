@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import unittest
 from pathlib import Path
 
 TUI_PATH = Path(__file__).resolve().parent.parent / "lib" / "tui.py"
+COMMON_PATH = Path(__file__).resolve().parent.parent / "lib" / "common.py"
 SPEC = importlib.util.spec_from_file_location("musicctl_tui", TUI_PATH)
 tui = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -164,10 +166,168 @@ class TestTuiHelpers(unittest.TestCase):
                 self.assertIs(res["idle-active"], True)
                 self.assertEqual(int(res["volume"]), 77)
                 self.assertEqual(tui.format_speed(res["speed"]), "")
+                snap = client.batch_status_snapshot()
+                self.assertIsNotNone(snap)
+                assert snap is not None
+                self.assertIs(snap["idle"], True)
+                self.assertEqual(snap["volume"], 77)
+                self.assertEqual(snap["speed_label"], "")
                 client.send(["quit"])
             finally:
                 proc.terminate()
                 proc.wait(timeout=3)
+
+    def test_common_cli_subcommands(self):
+        proc_artist = subprocess.run(
+            [sys.executable, str(COMMON_PATH), "primary-artist", "grentperez, Grant Perez", "grentperez"],
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(proc_artist.stdout.strip(), "grentperez")
+
+        candidates = json.dumps([
+            {"trackName": "sailing", "artistName": "grentperez", "duration": 244.0, "syncedLyrics": "[00:27.29] Hi"},
+        ])
+        proc_pick = subprocess.run(
+            [sys.executable, str(COMMON_PATH), "pick-lyrics", "sailing", "grentperez", "244.0"],
+            input=candidates,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        picked = json.loads(proc_pick.stdout)
+        self.assertEqual(len(picked), 1)
+        self.assertEqual(picked[0]["artistName"], "grentperez")
+
+        proc_sync = subprocess.run(
+            [sys.executable, str(COMMON_PATH), "parse-synced-lyrics"],
+            input=candidates,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        synced = json.loads(proc_sync.stdout)
+        self.assertEqual(synced["lines"], [{"t": 27.29, "text": "Hi"}])
+
+        fb_in = json.dumps({"lyrics": "Paroles de la chanson Demo\nHello"})
+        proc_fb = subprocess.run(
+            [sys.executable, str(COMMON_PATH), "parse-fallback-lyrics", "Demo", "Artist"],
+            input=fb_in,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        self.assertIn("=== Demo - Artist [Fallback] ===", proc_fb.stdout)
+        self.assertIn("Hello", proc_fb.stdout)
+
+    @staticmethod
+    def _make_headless_dashboard():
+        dash = tui.SovereignDashboard.__new__(tui.SovereignDashboard)
+        dash.ui_events = queue.SimpleQueue()
+        dash.active_tab = "home"
+        dash.search_loading = False
+        dash.search_seq = 0
+        dash.search_results = []
+        dash.tracks = []
+        dash.selected_idx = 0
+        dash.scroll_top = 0
+        dash.lyrics_track_key = ""
+        dash.lyrics_header = ""
+        dash.lyrics_lines = []
+        dash.lyrics_loading = False
+        dash.heal_inflight = set()
+        dash.toast_msg = ""
+        dash.toast_until = 0.0
+        dash._poll_calls = 0
+        dash._load_calls = 0
+        dash.poll_mpv = lambda: setattr(dash, "_poll_calls", dash._poll_calls + 1)
+        dash.load_tab_items = lambda: setattr(dash, "_load_calls", dash._load_calls + 1)
+        return dash
+
+    def test_drain_ui_events_lyrics_stale_guard(self):
+        dash = self._make_headless_dashboard()
+        dash.lyrics_track_key = "trackB"
+        dash.lyrics_header = "Loading lyrics: Track B..."
+        dash.lyrics_lines = []
+        dash.lyrics_loading = True
+
+        # Stale worker for trackA arrives late: must NOT overwrite trackB state or clear loading
+        dash.ui_events.put(("lyrics_done", ("trackA", "Track A [LRCLIB]", [(1.0, "old")])))
+        dash.drain_ui_events()
+        self.assertTrue(dash.lyrics_loading)
+        self.assertEqual(dash.lyrics_header, "Loading lyrics: Track B...")
+        self.assertEqual(dash.lyrics_lines, [])
+
+        # Current worker for trackB arrives: updates state and clears loading
+        dash.ui_events.put(("lyrics_done", ("trackB", "Track B [LRCLIB]", [(2.0, "new")])))
+        dash.drain_ui_events()
+        self.assertFalse(dash.lyrics_loading)
+        self.assertEqual(dash.lyrics_header, "Track B [LRCLIB]")
+        self.assertEqual(dash.lyrics_lines, [(2.0, "new")])
+
+    def test_drain_ui_events_search_seq_and_tab_isolation(self):
+        dash = self._make_headless_dashboard()
+        dash.active_tab = "search"
+        dash.search_seq = 2
+        dash.search_loading = True
+        dash.selected_idx = 4
+        dash.scroll_top = 2
+
+        # Stale seq 1 ignored
+        dash.ui_events.put(("search_done", (1, [("id1", "Old", "", "[YTM]")], True)))
+        dash.drain_ui_events()
+        self.assertTrue(dash.search_loading)
+        self.assertEqual(dash.search_results, [])
+        self.assertEqual(dash._load_calls, 0)
+
+        # Current seq 2 on search tab resets selection and reloads
+        rows = [("id2", "New", "", "[YTM]")]
+        dash.ui_events.put(("search_done", (2, rows, True)))
+        dash.drain_ui_events()
+        self.assertFalse(dash.search_loading)
+        self.assertEqual(dash.search_results, rows)
+        self.assertEqual(dash.selected_idx, 0)
+        self.assertEqual(dash.scroll_top, 0)
+        self.assertEqual(dash._load_calls, 1)
+        self.assertEqual(dash.toast_msg, "Found 1 tracks")
+
+        # When user switched away from search tab, search_done stores results without resetting cursor/reloading
+        dash.active_tab = "fav"
+        dash.search_seq = 3
+        dash.search_loading = True
+        dash.selected_idx = 3
+        dash.scroll_top = 1
+        rows3 = [("id3", "Another", "", "[YTM]")]
+        dash.ui_events.put(("search_done", (3, rows3, True)))
+        dash.drain_ui_events()
+        self.assertFalse(dash.search_loading)
+        self.assertEqual(dash.search_results, rows3)
+        self.assertEqual(dash.selected_idx, 3)
+        self.assertEqual(dash.scroll_top, 1)
+        self.assertEqual(dash._load_calls, 1)
+
+    def test_drain_ui_events_cli_and_heal(self):
+        dash = self._make_headless_dashboard()
+        dash.ui_events.put(("cli_done", ("Queued: Song", True)))
+        dash.drain_ui_events()
+        self.assertEqual(dash.toast_msg, "Queued: Song")
+        self.assertEqual(dash._poll_calls, 1)
+        self.assertEqual(dash._load_calls, 1)
+
+        dash.active_tab = "queue"
+        dash.heal_inflight = {"vid1", "vid2"}
+        dash.ui_events.put(("heal_done", (["vid1", "vid2"], True)))
+        dash.drain_ui_events()
+        self.assertEqual(dash.heal_inflight, set())
+        self.assertEqual(dash._load_calls, 1)
+
+        dash.active_tab = "hist"
+        dash.heal_inflight = {"vid3"}
+        dash.ui_events.put(("heal_done", (["vid3"], True)))
+        dash.drain_ui_events()
+        self.assertEqual(dash.heal_inflight, set())
+        self.assertEqual(dash._load_calls, 2)
 
 
 if __name__ == "__main__":

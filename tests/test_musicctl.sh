@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-BIN="/home/aomiqaza/Projects/musicctl/bin/musicctl"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BIN="$ROOT_DIR/bin/musicctl"
 TMP_DIR="$(mktemp -d /tmp/musicctl-test.XXXXXX)"
 export MUSICCTL_SOCKET="$TMP_DIR/musicctl.sock"
 export MUSICCTL_DATA_DIR="$TMP_DIR/data"
@@ -57,6 +59,11 @@ assert_contains "help output contains USAGE" "$HELP_OUT" "USAGE"
 assert_contains "help output contains radio" "$HELP_OUT" "radio"
 assert_contains "help output contains lyrics" "$HELP_OUT" "lyrics"
 assert_contains "help output contains sleep" "$HELP_OUT" "sleep"
+assert_contains "help output contains move" "$HELP_OUT" "move"
+assert_contains "help output contains quality" "$HELP_OUT" "quality"
+assert_contains "help output contains --quality" "$HELP_OUT" "--quality"
+assert_contains "help output contains sync" "$HELP_OUT" "sync"
+assert_contains "help output contains import" "$HELP_OUT" "import"
 
 # 3. Idle status & JSON format
 STATUS_IDLE="$("$BIN" status)"
@@ -273,16 +280,31 @@ assert_ok "preview hides 1.000000x speed" bash -c '! grep -qF "1.000000x" <<<"$1
 
 # 12. Desktop entry validation & install.sh dry-install/uninstall
 if command -v desktop-file-validate >/dev/null 2>&1; then
-  assert_ok "desktop-file-validate musicctl.desktop" desktop-file-validate "/home/aomiqaza/Projects/musicctl/musicctl.desktop"
+  assert_ok "desktop-file-validate musicctl.desktop" desktop-file-validate "$ROOT_DIR/musicctl.desktop"
 fi
 PREFIX_TMP="$TMP_DIR/prefix"
-assert_ok "install.sh dry install" /home/aomiqaza/Projects/musicctl/install.sh --prefix "$PREFIX_TMP" >/dev/null
+assert_ok "install.sh dry install" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" >/dev/null
 assert_ok "installed bin exists" test -x "$PREFIX_TMP/bin/musicctl"
+assert_ok "installed common.py exists" test -f "$PREFIX_TMP/share/musicctl/common.py"
 assert_ok "installed tui.py exists" test -f "$PREFIX_TMP/share/musicctl/tui.py"
 assert_ok "installed desktop exists" test -f "$PREFIX_TMP/share/applications/musicctl.desktop"
-assert_ok "install.sh uninstall" /home/aomiqaza/Projects/musicctl/install.sh --prefix "$PREFIX_TMP" --uninstall >/dev/null
+PREFIX_STATUS="$("$PREFIX_TMP/bin/musicctl" status --json)"
+assert_ok "installed prefix status json valid" jq -e '.state == "idle"' <<<"$PREFIX_STATUS" >/dev/null
+assert_ok "install.sh uninstall" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" --uninstall >/dev/null
 assert_ok "installed bin removed" test ! -e "$PREFIX_TMP/bin/musicctl"
+assert_ok "installed common.py removed" test ! -e "$PREFIX_TMP/share/musicctl/common.py"
 assert_ok "installed tui.py removed" test ! -e "$PREFIX_TMP/share/musicctl/tui.py"
+
+# 12b. Pure-Bash format_mmss and ascii_bar boundary checks
+assert_contains "format_mmss 0 -> 00:00" "$("$BIN" _format_mmss 0)" "00:00"
+assert_contains "format_mmss 009.8 -> 00:09" "$("$BIN" _format_mmss 009.8)" "00:09"
+assert_contains "format_mmss 65.9 -> 01:05" "$("$BIN" _format_mmss 65.9)" "01:05"
+assert_contains "format_mmss 3661.2 -> 1:01:01" "$("$BIN" _format_mmss 3661.2)" "1:01:01"
+assert_contains "format_mmss -5 -> 00:00" "$("$BIN" _format_mmss -5)" "00:00"
+assert_contains "ascii_bar dur 0" "$("$BIN" _ascii_bar 0 0 10)" "[----------]"
+assert_contains "ascii_bar pos 0" "$("$BIN" _ascii_bar 0 100 10)" "[>---------]"
+assert_contains "ascii_bar mid" "$("$BIN" _ascii_bar 50 100 10)" "[====>-----]"
+assert_contains "ascii_bar full" "$("$BIN" _ascii_bar 100 100 10)" "[==========]"
 
 # 13. WP1B-WP1F: Queue move, pl move/sync/prune, fallback lyrics, Spotify HTML parser, 3-tier quality & pluggable providers
 # 13a. Playlist TSV move (WP1B)
@@ -391,6 +413,12 @@ SM_M4A_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].m4a"
 assert_ok "dl --quality small writes .m4a file" test -s "$SM_M4A_OUT"
 M4A_PROBE="$(ffprobe -v error -show_entries stream=codec_name:format_tags=title -of json "$SM_M4A_OUT")"
 assert_ok "dl --quality small produces valid AAC M4A with title tag" jq -e '(.streams[0].codec_name == "aac") and (.format.tags.title == "dQw4w9WgXcQ")' <<<"$M4A_PROBE" >/dev/null
+BAD_COVER="$TMP_DIR/bad-cover.jpg"
+printf 'not-an-image' >"$BAD_COVER"
+FB_FLAC="$TMP_DIR/fb-spaced.flac"
+assert_ok "embed_metadata_cover fallback preserves spaced tags" "$BIN" _embed_metadata_cover "$FLAC_SRC" "$FB_FLAC" "To the Bone" "Pamungkas & Friends" "Walk the Talk" "$BAD_COVER"
+FB_PROBE="$(ffprobe -v error -show_entries format_tags=title,artist,album -of json "$FB_FLAC")"
+assert_ok "embed_metadata_cover fallback writes title/artist/album tags" jq -e '((.format.tags.title // .format.tags.TITLE) == "To the Bone") and ((.format.tags.artist // .format.tags.ARTIST) == "Pamungkas & Friends") and ((.format.tags.album // .format.tags.ALBUM) == "Walk the Talk")' <<<"$FB_PROBE" >/dev/null
 unset MUSICCTL_PROVIDERS_DIR
 
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
