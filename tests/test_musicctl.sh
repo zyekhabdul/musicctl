@@ -485,6 +485,79 @@ assert_contains "dl --quality small transcodes WAV pcm_s16le to AAC" "$DL_WAV_SM
 assert_ok "dl --quality small from WAV writes .m4a file" test -s "$SM_M4A_OUT"
 unset MUSICCTL_PROVIDERS_DIR
 
+# 13h. Multi-candidate fallback, strict cd/hires validation, stream probe fallback, sleep PGID kill, and doctor quality format
+AAC10="$TMP_DIR/lossy10.m4a"
+HIRES10="$TMP_DIR/hires10.flac"
+ffmpeg -y -v error -f lavfi -i anullsrc=r=44100:cl=stereo -t 2 -c:a aac -b:a 96k "$AAC10"
+ffmpeg -y -v error -f lavfi -i anullsrc=r=96000:cl=stereo -t 2 -c:a flac -sample_fmt s32 "$HIRES10"
+
+assert_ok "ffprobe rejects 16-bit 44.1kHz FLAC for hires" bash -c '! "$1" _validate_audio "$2" 10 1 1 >/dev/null 2>&1' _ "$BIN" "$FLAC_SRC"
+HIRES_VAL="$("$BIN" _validate_audio "$HIRES10" 2 1 1)"
+assert_ok "ffprobe accepts 96kHz FLAC for hires" jq -e '.codec == "flac" and .sample_rate == 96000' <<<"$HIRES_VAL" >/dev/null
+
+PROV_MULTI="$TMP_DIR/providers-multi"
+mkdir -p "$PROV_MULTI"
+cat >"$PROV_MULTI/10-lossy.sh" <<PROV_M1
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"aac","bit_depth":0,"sample_rate":44100}\n' "$AAC10"
+PROV_M1
+cat >"$PROV_MULTI/20-cd.sh" <<PROV_M2
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"flac","bit_depth":16,"sample_rate":44100}\n' "$FLAC_SRC"
+PROV_M2
+cat >"$PROV_MULTI/30-hires.sh" <<PROV_M3
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"flac","bit_depth":24,"sample_rate":96000}\n' "$HIRES10"
+PROV_M3
+chmod +x "$PROV_MULTI"/*.sh
+
+export MUSICCTL_PROVIDERS_DIR="$PROV_MULTI"
+rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
+DL_MULTI_CD="$("$BIN" dl --quality cd "dQw4w9WgXcQ")"
+assert_contains "dl --quality cd skips lossy provider and picks 20-cd.sh" "$DL_MULTI_CD" "20-cd.sh"
+
+rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
+DL_MULTI_HR="$("$BIN" dl --quality hires "dQw4w9WgXcQ")"
+assert_contains "dl --quality hires skips cd and picks 30-hires.sh" "$DL_MULTI_HR" "30-hires.sh"
+
+rm -f "$PROV_MULTI/30-hires.sh" "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
+DL_CASC_HR="$("$BIN" dl --quality hires "dQw4w9WgXcQ")"
+assert_contains "dl --quality hires cascades to cd provider when hires missing" "$DL_CASC_HR" "20-cd.sh"
+
+PROV_STREAM="$TMP_DIR/providers-stream"
+mkdir -p "$PROV_STREAM"
+cat >"$PROV_STREAM/10-missing.sh" <<'PROV_S1'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"/nonexistent/missing.flac","codec":"flac"}\n'
+PROV_S1
+cat >"$PROV_STREAM/20-wav.sh" <<PROV_S2
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"wav","bit_depth":16,"sample_rate":44100}\n' "$WAV10"
+PROV_S2
+chmod +x "$PROV_STREAM"/*.sh
+export MUSICCTL_PROVIDERS_DIR="$PROV_STREAM"
+assert_ok "play falls back to 2nd stream provider on probe failure" "$BIN" play "dQw4w9WgXcQ" >/dev/null
+STREAM_JSON="$("$BIN" status --json)"
+assert_ok "stream fallback loads wav into mpv" jq -e '.state == "playing" and .codec == "pcm_s16le"' <<<"$STREAM_JSON" >/dev/null
+"$BIN" stop >/dev/null
+unset MUSICCTL_PROVIDERS_DIR
+
+assert_ok "sleep 9 starts timer" "$BIN" sleep 9 >/dev/null
+SLEEP_PGID="$(cut -d: -f1 "$MUSICCTL_DATA_DIR/sleep.state")"
+SLEEP_CHILD="$(pgrep -P "$SLEEP_PGID" | head -n 1 || true)"
+assert_ok "sleep child process running" test -n "$SLEEP_CHILD"
+assert_ok "sleep off kills timer" "$BIN" sleep off >/dev/null
+sleep 0.1
+assert_ok "sleep child process terminated (no orphan)" bash -c '! kill -0 "$1" 2>/dev/null' _ "$SLEEP_CHILD"
+
+DOC_SMALL="$(MUSICCTL_QUALITY=small "$BIN" doctor)"
+assert_contains "doctor reflects small quality format" "$DOC_SMALL" "249/250/139"
+
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
 if [[ "$OFFLINE" != "1" ]]; then
   SEARCH_OUT="$("$BIN" search "pamungkas to the bone")"

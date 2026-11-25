@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 
 TUI_PATH = Path(__file__).resolve().parent.parent / "lib" / "tui.py"
@@ -361,6 +362,112 @@ class TestTuiHelpers(unittest.TestCase):
         self.assertEqual(dash.last_art_vid, "vidBBBBBBBB")
         self.assertEqual(dash.art_pairs, {})
         self.assertEqual(dash.next_art_pair, tui.ART_PAIR_START)
+
+    def test_mpv_client_batch_session_snapshot_live_isolated(self):
+        with tempfile.TemporaryDirectory(prefix="musicctl-sess-") as tmp:
+            sock = os.path.join(tmp, "mpv.sock")
+            wav_path = os.path.join(tmp, "tone.wav")
+            with wave.open(wav_path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b"\x00\x00" * 16000)
+
+            proc = subprocess.Popen(
+                [
+                    "mpv",
+                    "--no-video",
+                    "--idle=yes",
+                    "--force-window=no",
+                    "--ao=null",
+                    f"--input-ipc-server={sock}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                for _ in range(50):
+                    if os.path.exists(sock):
+                        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        try:
+                            s.connect(sock)
+                            s.close()
+                            break
+                        except OSError:
+                            s.close()
+                    time.sleep(0.1)
+
+                client = tui.MpvClient(sock, timeout=1.0)
+                self.assertIsNone(client.batch_session_snapshot())
+
+                self.assertTrue(client.send(["loadfile", wav_path, "replace"]))
+                self.assertTrue(client.send(["set_property", "volume", 64]))
+                self.assertTrue(client.send(["set_property", "loop-playlist", "inf"]))
+                self.assertTrue(client.send(["set_property", "speed", 1.25]))
+
+                snap = None
+                for _ in range(30):
+                    snap = client.batch_session_snapshot()
+                    if snap is not None:
+                        break
+                    time.sleep(0.1)
+
+                self.assertIsNotNone(snap)
+                assert snap is not None
+                self.assertEqual(snap["playlist"], [wav_path])
+                self.assertEqual(snap["volume"], 64)
+                self.assertEqual(snap["loop"], "all")
+                self.assertEqual(snap["speed"], 1.25)
+                self.assertIsInstance(snap["saved_at"], int)
+                client.send(["quit"])
+            finally:
+                proc.terminate()
+                proc.wait(timeout=3)
+
+    def test_refresh_local_files_meta_stat_cache(self):
+        with tempfile.TemporaryDirectory(prefix="musicctl-meta-") as tmp:
+            data_dir = Path(tmp)
+            (data_dir / "favorites.tsv").write_text("id111111111\tSong One\tArtist\n", encoding="utf-8")
+            (data_dir / "audio.state").write_text("bass:1\n", encoding="utf-8")
+            (data_dir / "quality.state").write_text("hires\n", encoding="utf-8")
+
+            dash = self._make_headless_dashboard()
+            dash.data_dir = data_dir
+            dash.fav_ids = set()
+            dash.eq_mode = "flat"
+            dash.norm_on = False
+            dash.quality_mode = "cd"
+            dash._file_sigs = {}
+
+            calls = 0
+            orig_read_tsv = dash.read_tsv
+
+            def counted_read_tsv(path, tag):
+                nonlocal calls
+                calls += 1
+                return orig_read_tsv(path, tag)
+
+            dash.read_tsv = counted_read_tsv
+
+            dash.refresh_local_files_meta()
+            self.assertEqual(calls, 1)
+            self.assertEqual(dash.fav_ids, {"id111111111"})
+            self.assertEqual(dash.eq_mode, "bass")
+            self.assertTrue(dash.norm_on)
+            self.assertEqual(dash.quality_mode, "hires")
+
+            # Unchanged files must not re-read favorites.tsv
+            dash.refresh_local_files_meta()
+            self.assertEqual(calls, 1)
+
+            # Mutate favorites.tsv with distinct size/mtime -> reloads
+            (data_dir / "favorites.tsv").write_text(
+                "id111111111\tSong One\tArtist\nid222222222\tSong Two\tArtist\n",
+                encoding="utf-8",
+            )
+            dash.refresh_local_files_meta()
+            self.assertEqual(calls, 2)
+            self.assertEqual(dash.fav_ids, {"id111111111", "id222222222"})
 
 
 if __name__ == "__main__":
