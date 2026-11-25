@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added queue and named playlist track reordering (`musicctl move`, `musicctl pl move`, and TUI `J`/`K` + `Move Up`/`Move Down` buttons).
+- Added offline playlist smart-sync (`musicctl pl sync [--quality <tier>] [--prune]`).
+- Added multi-provider lyrics fallback (`LRCLIB` -> `lyrics.ovh` `[Fallback]` with 3s timeout).
+- Added public Spotify playlist, album, and track URL importer (`musicctl pl import` and `musicctl play <spotify_track_url>`).
+- Added 3-tier audio quality (`small` / `cd` / `hires` / `ask`), ordered UNIX pluggable provider chain (`$MUSICCTL_PROVIDERS_DIR`), `ffprobe` audio integrity/duration validation, `ffmpeg` small-tier transcode & metadata/cover embedding, and lossless codec/bit-depth badges in `lib/tui.py`.
+- Hardened TUI worker concurrency (`queue.SimpleQueue` main-loop dispatch + stale `track_key`/`search_seq` guards), Bash array quoting in `embed_metadata_cover` fallback, `cmd_tui`/`cmd_sleep` env forwarding, and portable `SCRIPT_DIR`/`ROOT_DIR` paths in `tests/test_musicctl.sh`.
+- Consolidated shared Python `mpv` IPC, artist extraction, and lyrics parsing helpers into `lib/common.py`, and replaced `format_mmss`/`ascii_bar` Python spawns with pure-Bash arithmetic.
+
 ## v2.0.0 (2026-11-25)
 
 - Added native, 100% clickable & realtime Python 3 `curses` Sovereign Dashboard (`lib/tui.py`) as default TUI (`musicctl` / `musicctl tui`):

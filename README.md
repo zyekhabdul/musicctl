@@ -38,6 +38,7 @@ Arch Linux PKGBUILD is provided in [packaging/arch/PKGBUILD](packaging/arch/PKGB
 - **Core**: `bash`, `mpv`, `yt-dlp`, `fzf`, `curl`, `jq`, `python3`
 - **Optional**:
   - `chafa`: terminal album art preview inside TUI cockpit
+  - `ffmpeg` (`ffprobe`): lossless provider integrity validation, `small` transcode, and metadata/cover embedding
   - `notify-send` (`libnotify`): track change desktop notifications
   - `mpv-mpris`: native MPRIS media key & lockscreen integration (`playerctl`)
 
@@ -84,6 +85,24 @@ musicctl stop                   # Save session and stop background mpv daemon
 ```
 
 ## TUI Keybindings
+
+### Sovereign Dashboard (Default TUI)
+
+| Control | Action |
+| --- | --- |
+| Click / Double-click / Right-click row | Select / Play or Jump / Enqueue track |
+| Click progress / volume bar, Wheel | Seek timestamp / Set volume / Scroll list |
+| `/` or `Ctrl-S` | Focus search input (`Esc` to leave) |
+| `1`-`6` / `Tab` | Switch left tabs / Cycle right panel (`Up Next`, `Lyrics`, `Info`) |
+| `j`/`k` or `Up`/`Down`, `g`/`G` | Move cursor (`g` top, `G` bottom) |
+| `J` / `K` (on Queue tab) | Move selected queue track down / up |
+| `Enter` / `a` / `f` / `r` / `d` | Play or Jump / Enqueue / Toggle fav / Queue radio / Download |
+| `Space` / `n` / `b` / `x` | Pause or Play / Next / Prev / Stop daemon |
+| `o` / `u` / `Q` / `e` / `N` / `m` | Cycle loop / Shuffle / Cycle quality / Cycle EQ / Toggle norm / Mute |
+| `+` or `=` / `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |
+| `?` / `q` | Toggle help modal / Quit TUI (daemon stays alive) |
+
+### Legacy fzf Cockpit (`musicctl fzf`)
 
 | Key | Action |
 | --- | --- |

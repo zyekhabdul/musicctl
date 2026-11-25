@@ -41,16 +41,18 @@ fi
 BASH_COMP="${DATA_DIR}/bash-completion/completions/musicctl"
 ZSH_COMP="${DATA_DIR}/zsh/site-functions/_musicctl"
 DESKTOP_DST="${DATA_DIR}/applications/musicctl.desktop"
+COMMON_DST="${DATA_DIR}/musicctl/common.py"
 TUI_DST="${DATA_DIR}/musicctl/tui.py"
 
 if ((UNINSTALL == 1)); then
-  rm -f "${BIN_DIR}/musicctl" "$BASH_COMP" "$ZSH_COMP" "$DESKTOP_DST" "$TUI_DST"
+  rm -f "${BIN_DIR}/musicctl" "$BASH_COMP" "$ZSH_COMP" "$DESKTOP_DST" "$COMMON_DST" "$TUI_DST"
   rmdir "${DATA_DIR}/musicctl" 2>/dev/null || true
   echo "[OK] Uninstalled musicctl from ${PREFIX}"
   exit 0
 fi
 
 install -Dm755 "${SCRIPT_DIR}/bin/musicctl" "${BIN_DIR}/musicctl"
+install -Dm644 "${SCRIPT_DIR}/lib/common.py" "$COMMON_DST"
 install -Dm644 "${SCRIPT_DIR}/lib/tui.py" "$TUI_DST"
 install -Dm644 "${SCRIPT_DIR}/completions/musicctl.bash" "$BASH_COMP"
 install -Dm644 "${SCRIPT_DIR}/completions/_musicctl" "$ZSH_COMP"

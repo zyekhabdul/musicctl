@@ -17,7 +17,7 @@ lint:
 	for file in bin/musicctl install.sh tests/test_musicctl.sh completions/musicctl.bash; do \
 		bash -n "$$file"; \
 	done; \
-	python3 -m py_compile lib/tui.py tests/test_tui.py; \
+	python3 -m py_compile lib/common.py lib/tui.py tests/test_tui.py; \
 	if command -v desktop-file-validate >/dev/null 2>&1; then \
 		desktop-file-validate musicctl.desktop; \
 	fi; \
