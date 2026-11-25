@@ -3,7 +3,8 @@
 _musicctl() {
   local -a commands
   commands=(
-    'tui:Launch interactive fzf Sovereign Cockpit'
+    'tui:Launch interactive clickable Sovereign Dashboard'
+    'fzf:Launch legacy fzf TUI cockpit with realtime preview'
     'play:Resolve track or local file and play immediately'
     'add:Resolve track or local file and append to queue'
     'search:Search YouTube Music via InnerTube'
@@ -13,11 +14,13 @@ _musicctl() {
     'next:Next track in queue'
     'prev:Previous track in queue'
     'jump:Jump to 1-based queue index'
+    'move:Reorder queue item position'
     'remove:Remove 1-based queue item'
     'clear:Clear upcoming queue items'
     'shuffle:Shuffle active mpv queue'
     'loop:Cycle or set repeat mode'
     'mute:Toggle mute'
+    'quality:Set audio quality tier and provider priority'
     'eq:Set parametric EQ preset'
     'norm:Toggle EBU R128 loudness normalization'
     'speed:Set playback speed'
@@ -54,7 +57,7 @@ _musicctl() {
       ;;
     pl|playlist)
       if (( CURRENT == 3 )); then
-        _values 'subcommand' ls list create add show play rm delete
+        _values 'subcommand' ls list create add show play move sync import rm delete
       elif (( CURRENT == 4 )); then
         local pdir="${MUSICCTL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/musicctl}/playlists"
         if [[ -d "$pdir" ]]; then
@@ -84,6 +87,9 @@ _musicctl() {
       ;;
     eq)
       _values 'preset' flat bass warm vocal bright rock cycle status
+      ;;
+    quality)
+      _values 'tier' small cd hires ask cycle status
       ;;
     norm)
       _values 'action' on off toggle status

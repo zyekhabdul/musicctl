@@ -1,7 +1,7 @@
 # Maintainer: Zyekh Abdul <zyekhabdul@users.noreply.github.com>
 
 pkgname=musicctl
-pkgver=1.1.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="Lightweight standalone YouTube Music CLI & TUI player (mpv + yt-dlp + fzf)"
 arch=('any')
@@ -28,6 +28,7 @@ package() {
     cd "$srcdir/$pkgname-$pkgver"
 
     install -Dm755 bin/musicctl "$pkgdir/usr/bin/musicctl"
+    install -Dm644 lib/tui.py "$pkgdir/usr/share/musicctl/tui.py"
     install -Dm644 completions/musicctl.bash "$pkgdir/usr/share/bash-completion/completions/musicctl"
     install -Dm644 completions/_musicctl "$pkgdir/usr/share/zsh/site-functions/_musicctl"
     install -Dm644 musicctl.desktop "$pkgdir/usr/share/applications/musicctl.desktop"

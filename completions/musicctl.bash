@@ -7,7 +7,7 @@ _musicctl_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cmd="${COMP_WORDS[1]:-}"
 
-  local commands="tui play add search radio toggle pause next prev jump remove rm clear shuffle loop repeat mute eq norm speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
+  local commands="tui fzf play add search radio toggle pause next prev jump move mv remove rm clear shuffle loop repeat mute quality eq norm speed vol volume seek status queue lyrics download dl local pl playlist sleep resume save cache history hist fav doctor stop version help"
 
   if ((COMP_CWORD == 1)); then
     COMPREPLY=( $(compgen -W "$commands --help --version" -- "$cur") )
@@ -22,7 +22,7 @@ _musicctl_complete() {
       ;;
     pl|playlist)
       if ((COMP_CWORD == 2)); then
-        COMPREPLY=( $(compgen -W "ls list create add show play rm delete" -- "$cur") )
+        COMPREPLY=( $(compgen -W "ls list create add show play move sync import rm delete" -- "$cur") )
       elif ((COMP_CWORD == 3)) && [[ "$prev" != "ls" && "$prev" != "list" && "$prev" != "create" ]]; then
         local pdir="${MUSICCTL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/musicctl}/playlists"
         if [[ -d "$pdir" ]]; then
@@ -55,6 +55,9 @@ _musicctl_complete() {
       ;;
     eq)
       COMPREPLY=( $(compgen -W "flat bass warm vocal bright rock cycle status" -- "$cur") )
+      ;;
+    quality)
+      COMPREPLY=( $(compgen -W "small cd hires ask cycle status" -- "$cur") )
       ;;
     norm)
       COMPREPLY=( $(compgen -W "on off toggle status" -- "$cur") )

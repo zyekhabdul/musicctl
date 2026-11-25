@@ -1,20 +1,24 @@
 # musicctl
 
 Lightweight, standalone YouTube Music CLI & TUI player modeled after `gamectl`.
-Streams ad-free audio via InnerTube (`WEB_REMIX`) + `yt-dlp` + background `mpv` IPC daemon + `fzf` cockpit (~20-30 MB RAM, zero Electron).
+Streams ad-free audio via InnerTube (`WEB_REMIX`) + `yt-dlp` + background `mpv` IPC daemon + **clickable realtime Sovereign Dashboard** (~20-30 MB RAM, zero Electron).
 
 ```text
-╭─ NOW PLAYING ─────────────────────────────────╮
- [PLAY] To the Bone
- [========>-----------] 02:14/05:45
- Vol: 80%  Queue: 1/12  Loop: off
-╰───────────────────────────────────────────────╯
-╭─ SELECTED TRACK ──────────────────────────────╮
- Title : To the Bone
- Info  : Pamungkas • Flying Solo • 5:45
- ID    : IR7tYHdYN2Q [YTM]
- Fav   : Yes
-╰───────────────────────────────────────────────╯
+ MUSICCTL v2.0   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local         [PLAY] OPUS 48kHz
+ Search: [ pamungkas to the bone        ]  [Search] [Clear]
+╭─ 1 Home (12) ─────────────────────────╮╭─ NOW PLAYING ──────────────────────────────────────╮
+│▸ 1.* To the Bone — Pamungkas    [FAV] ││ [ART]  To the Bone                                │
+│  2.  Monolog — Pamungkas        [HIS] ││        Audio: opus 48kHz  |  Queue: 1/12           │
+│  3.  One Only — Pamungkas       [HIS] ││        EQ: flat  |  Norm: off  |  Loop: off       │
+│                                       ││        ▂▅▇▃▆▄▂▅▇▆▃▂▅▇▄▃▆▂▅▇                        │
+│                                       │╰────────────────────────────────────────────────────╯
+│                                       │╭─ [Up Next] [Lyrics] [Info] ────────────────────────╮
+│                                       ││▸  1. To the Bone                                   │
+│                                       ││   2. Monolog                                       │
+╰───────────────────────────────────────╯╰────────────────────────────────────────────────────╯
+ 02:14  ━━━━━━━━━━●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  05:45
+ [|< Prev] [|| Pause] [>| Next] [[] Stop] [~ Radio] [* Fav]   Vol [-] ████████░░  80% [+]
+ [Loop:off] [Shuf] [EQ:flat] [Norm:off] [Mute] [? Help]
 ```
 
 ## Quick Install
@@ -42,8 +46,9 @@ Run `musicctl doctor` to verify dependencies, MPRIS detection, daemon state, and
 ## CLI Usage
 
 ```bash
-musicctl                        # Launch interactive fzf Sovereign Cockpit
-musicctl tui "pamungkas"        # Launch TUI preloaded with YTM search
+musicctl                        # Launch clickable realtime Sovereign Dashboard
+musicctl tui "pamungkas"        # Launch Dashboard preloaded with YTM search
+musicctl fzf [query]            # Launch legacy fzf cockpit (1s realtime ticker)
 musicctl play "to the bone"     # Search YTM (or local file/URL/ID) and play
 musicctl add "one only"         # Append top match to mpv queue
 musicctl search "lofi beats"    # Print TSV search results (id, title, meta)
@@ -51,11 +56,13 @@ musicctl radio [current|query]  # Start/append YTM Up Next Radio mix
 musicctl toggle                 # Toggle play/pause
 musicctl next | prev            # Next / previous track in queue
 musicctl jump <N>               # Jump to queue item #N (1-based)
+musicctl move <from> <to>       # Reorder queue item #from to #to (1-based)
 musicctl remove <N>             # Remove queue item #N
 musicctl clear [--all]          # Clear upcoming queue (or --all incl. current)
 musicctl shuffle                # Shuffle active mpv queue
 musicctl loop [off|one|all]     # Cycle or set repeat mode
 musicctl mute                   # Toggle mute
+musicctl quality [small|cd|hires|ask|cycle]  # Set audio quality & provider priority
 musicctl eq [preset|cycle]      # Set EQ (flat/bass/warm/vocal/bright/rock)
 musicctl norm [on|off|toggle]   # Toggle EBU R128 loudness normalization
 musicctl speed <0.25..4.0|reset># Set playback speed
@@ -63,10 +70,10 @@ musicctl vol 80                 # Set volume (supports +10 / -10)
 musicctl seek +15               # Seek relative seconds
 musicctl status [--json]        # Show status, loop/mute/speed, or Waybar JSON
 musicctl queue                  # List active mpv queue
-musicctl lyrics [--live] [q]    # Fetch lyrics via LRCLIB (or --live sync)
-musicctl download [current|q]   # Download track as Opus audio + metadata
+musicctl lyrics [--live] [q]    # Fetch lyrics via LRCLIB / Fallback (or --live sync)
+musicctl dl [--quality T] [q]   # Download track (FLAC/M4A/Opus) + embedded tags & cover
 musicctl local                  # List downloaded local audio files
-musicctl pl ls|create|add|show|play|rm|delete  # Named local playlists
+musicctl pl ls|create|add|show|play|move|sync|import|rm|delete  # Playlists, smart sync & Spotify URL import
 musicctl sleep <min|off|status> # Auto-stop sleep timer
 musicctl resume | save          # Restore or snapshot queue & playback position
 musicctl cache [status|clear]   # Inspect or clear auto-cached audio & art
@@ -114,10 +121,14 @@ MUSICCTL_ART=1
 MUSICCTL_ART_FORMAT=symbols
 MUSICCTL_EQ=flat
 MUSICCTL_NORM=0
+MUSICCTL_QUALITY=cd
+MUSICCTL_PROVIDERS_DIR="$HOME/.config/musicctl/providers"
 MUSICCTL_DOWNLOAD_DIR="$HOME/Music/musicctl"
 ```
 
 Set `MUSICCTL_ART_FORMAT=sixel` for high-resolution Sixel album art on terminals like `foot`.
+
+For Orpheon-style lossless (`cd`/`hires`) streaming and downloads, place executable provider scripts in `$MUSICCTL_PROVIDERS_DIR` — see [examples/providers/README.md](examples/providers/README.md).
 
 ## Waybar Custom Module Snippet
 
