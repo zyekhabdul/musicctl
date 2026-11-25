@@ -419,6 +419,70 @@ FB_FLAC="$TMP_DIR/fb-spaced.flac"
 assert_ok "embed_metadata_cover fallback preserves spaced tags" "$BIN" _embed_metadata_cover "$FLAC_SRC" "$FB_FLAC" "To the Bone" "Pamungkas & Friends" "Walk the Talk" "$BAD_COVER"
 FB_PROBE="$(ffprobe -v error -show_entries format_tags=title,artist,album -of json "$FB_FLAC")"
 assert_ok "embed_metadata_cover fallback writes title/artist/album tags" jq -e '((.format.tags.title // .format.tags.TITLE) == "To the Bone") and ((.format.tags.artist // .format.tags.ARTIST) == "Pamungkas & Friends") and ((.format.tags.album // .format.tags.ALBUM) == "Walk the Talk")' <<<"$FB_PROBE" >/dev/null
+
+# 13g. P3: Escaped mpv headers, preflight stream probe, and lossless WAV small transcode
+HDR_ESC="$(printf '%s' '{"headers":{"Cookie":"a=1, b=2","X-Path":"C:\\dir\\f"}}' | "$BIN" _format_mpv_headers)"
+assert_contains "format_mpv_headers escapes comma and backslash" "$HDR_ESC" 'Cookie: a=1\, b=2,X-Path: C:\\dir\\f'
+
+assert_ok "probe_provider_stream accepts non-empty local file" "$BIN" _probe_provider_stream "file://$FLAC_SRC" '{}'
+assert_ok "probe_provider_stream rejects missing local file" bash -c '! "$1" _probe_provider_stream "/nonexistent/missing.flac" "{}"' _ "$BIN"
+
+HTTP_PORT_FILE="$TMP_DIR/http.port"
+python3 - "$HTTP_PORT_FILE" <<'PY' &
+import http.server
+import sys
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        if self.path == "/ok":
+            self.send_response(200)
+        elif self.path == "/no-head":
+            self.send_response(405)
+        else:
+            self.send_response(403)
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path in ("/ok", "/no-head"):
+            self.send_response(206 if self.headers.get("Range") else 200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(403)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+HTTP_PID=$!
+for _ in $(seq 1 30); do
+  [[ -s "$HTTP_PORT_FILE" ]] && break
+  sleep 0.05
+done
+HTTP_PORT="$(cat "$HTTP_PORT_FILE")"
+assert_ok "probe_provider_stream HTTP 200 HEAD passes" "$BIN" _probe_provider_stream "http://127.0.0.1:${HTTP_PORT}/ok" '{}'
+assert_ok "probe_provider_stream HTTP 405 HEAD retries Range GET 206" "$BIN" _probe_provider_stream "http://127.0.0.1:${HTTP_PORT}/no-head" '{}'
+assert_ok "probe_provider_stream HTTP 403 rejected" bash -c '! "$1" _probe_provider_stream "http://127.0.0.1:${HTTP_PORT}/denied" "{}"' _ "$BIN"
+kill "$HTTP_PID" 2>/dev/null || true
+wait "$HTTP_PID" 2>/dev/null || true
+
+WAV10="$TMP_DIR/sample10.wav"
+ffmpeg -y -v error -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -c:a pcm_s16le "$WAV10"
+cat >"$PROV_DIR/20-mock-flac.sh" <<PROV_WAV
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"url":"%s","codec":"wav","bit_depth":16,"sample_rate":44100}\n' "$WAV10"
+PROV_WAV
+chmod +x "$PROV_DIR/20-mock-flac.sh"
+rm -f "$SM_M4A_OUT"
+DL_WAV_SM="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+assert_contains "dl --quality small transcodes WAV pcm_s16le to AAC" "$DL_WAV_SM" "aac (from pcm_s16le)"
+assert_ok "dl --quality small from WAV writes .m4a file" test -s "$SM_M4A_OUT"
 unset MUSICCTL_PROVIDERS_DIR
 
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)

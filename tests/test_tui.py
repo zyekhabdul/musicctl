@@ -329,6 +329,39 @@ class TestTuiHelpers(unittest.TestCase):
         self.assertEqual(dash.heal_inflight, set())
         self.assertEqual(dash._load_calls, 2)
 
+    def test_apply_search_key_utf8_and_controls(self):
+        q = ""
+        for ch in "東京 Café тест":
+            q, act = tui.apply_search_key(q, ch)
+            self.assertEqual(act, "stay")
+        self.assertEqual(q, "東京 Café тест")
+
+        q, act = tui.apply_search_key(q, 127)
+        self.assertEqual((q, act), ("東京 Café тес", "stay"))
+        q, act = tui.apply_search_key(q, "\x7f")
+        self.assertEqual((q, act), ("東京 Café те", "stay"))
+        q2, act2 = tui.apply_search_key(q, "\n")
+        self.assertEqual((q2, act2), ("東京 Café те", "submit"))
+        q3, act3 = tui.apply_search_key(q, 27)
+        self.assertEqual((q3, act3), ("東京 Café те", "blur"))
+        q4, act4 = tui.apply_search_key(q, "\x01")
+        self.assertEqual((q4, act4), ("東京 Café те", "stay"))
+
+    def test_reset_art_pairs_on_track_change(self):
+        dash = self._make_headless_dashboard()
+        dash.art_pairs = {(117, -1): 25, (235, 117): 26}
+        dash.last_art_vid = "vidAAAAAAAA"
+        dash.next_art_pair = 27
+
+        self.assertFalse(dash.reset_art_pairs_for_vid("vidAAAAAAAA"))
+        self.assertEqual(dash.next_art_pair, 27)
+        self.assertEqual(len(dash.art_pairs), 2)
+
+        self.assertTrue(dash.reset_art_pairs_for_vid("vidBBBBBBBB"))
+        self.assertEqual(dash.last_art_vid, "vidBBBBBBBB")
+        self.assertEqual(dash.art_pairs, {})
+        self.assertEqual(dash.next_art_pair, tui.ART_PAIR_START)
+
 
 if __name__ == "__main__":
     unittest.main()
