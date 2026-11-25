@@ -1408,7 +1408,7 @@ class SovereignDashboard:
 
     def render_header(self, w: int) -> None:
         self.safe_addstr(0, 0, " " * w, curses.color_pair(PAIR_PILL_BTN))
-        brand = " MUSICCTL v2.2 "
+        brand = " MUSICCTL v2.3 "
         self.safe_addstr(0, 0, brand, curses.color_pair(PAIR_PILL_ACTIVE) | curses.A_BOLD)
         cx = len(brand) + 1
         for key, lbl in self.TABS:

@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.3.0 (2026-11-25)
+
+- **Adaptive Full-Space TUI Layout (`lib/tui.py`)**: Replaced fixed 52/48 split with aspect-aware layout engine (`auto`, `split`, `stacked`, `focus`) via `v` cycling and `z` drawer toggle, safe short-terminal bounds clamping, and aligned two-column `Title | Meta` list rows on wide panes.
+- **Lightweight Stdlib Wave, Dynamic Art & Lyrics Race Fix (`lib/tui.py`)**: Full-width pure-stdlib audio pulse bar matching card width, dynamic `chafa` symbol art scaling, deferred lyrics lookup while `mpv` `media-title` is still a `watch?v=` / ID placeholder, and contextual hints on empty sub-panels.
+- **Hybrid Keyboard + Mouse Parity (`lib/tui.py`)**: Unified key hints on clickable controls, dual-pane focus (`h`/`l`, `Left`/`Right`), keyboard scrolling (`j`/`k`, `PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `g`/`G`) across `Up Next`/`Lyrics`/`Info`/`DL`, keyboard batch triggers (`P`/`E`/`W`/`X`), `Ctrl-U`/`Ctrl-K`/`Ctrl-L` search clear, `Shift-Tab` / `U`/`Y`/`I`/`D` drawer tabs, and fixed drawer child-button hitbox priority over background focus.
+- **Reliability & SSOT Consolidation (`bin/musicctl`, `lib/common.py`, `lib/downloader.py`, `lib/providers.py`, `lib/tui.py`)**: Fixed catalog/container ref routing (`pl:*`, `[L-ART]`, `[L-ALB]`, `[ALB]`, `[ART]`, `[PL]`), serialized TUI batch `Play All`/`+Q All`, manifest-scoped `dl sync --prune` with partial-failure guard, consolidated Spotify HTML parser + lyrics fetcher + `USER_AGENT` + batched `mpv` IPC loaders into `lib/common.py`, and aligned `list_local_files` depth/filter parity with `lib/library.py`.
+
 ## v2.2.0 (2026-11-25)
 
 - **Multi-Catalog Entity Engine (`lib/catalog.py`)**: Zero-key search and browse across `ytm`, `deezer` (ISRC + 1000x1000 square art), and `itunes` (`songs|albums|artists|playlists`), plus universal `play`/`add`/`dl` support for catalog refs, Spotify, SoundCloud, Bandcamp, and local files.

@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-USER_AGENT = "musicctl/2.2"
+USER_AGENT = "musicctl/2.3"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
 

@@ -7,7 +7,7 @@
 set -uo pipefail
 
 SELF_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
-MUSICCTL_VERSION="2.2.0"
+MUSICCTL_VERSION="2.3.0"
 MUSICCTL_CONFIG="${MUSICCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/config}"
 [[ -n "${MUSICCTL_QUALITY+x}" ]] && MUSICCTL_QUALITY_ENV=1
 [[ -n "${MUSICCTL_AUTOPLAY+x}" ]] && MUSICCTL_AUTOPLAY_ENV=1

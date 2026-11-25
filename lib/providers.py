@@ -19,7 +19,7 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from common import normalize_track_title
+from common import USER_AGENT, normalize_track_title
 
 LOSSLESS_CODECS = ("flac", "alac", "wav")
 URL_SCHEME_RE = re.compile(r"^(https?://|file://|/)")
@@ -185,7 +185,7 @@ def probe_stream_url(
         p = Path(url)
         return p.is_file() and p.stat().st_size > 0
 
-    hdrs = {"User-Agent": "musicctl/2.2"}
+    hdrs = {"User-Agent": USER_AGENT}
     if isinstance(headers, dict):
         for k, v in headers.items():
             hdrs[str(k)] = str(v)
@@ -257,7 +257,7 @@ def fetch_provider_file(
                 return dest.is_file() and dest.stat().st_size > 0
             return False
 
-        hdrs = {"User-Agent": "musicctl/2.2"}
+        hdrs = {"User-Agent": USER_AGENT}
         if isinstance(headers, dict):
             for k, v in headers.items():
                 hdrs[str(k)] = str(v)

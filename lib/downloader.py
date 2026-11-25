@@ -169,7 +169,7 @@ def prepare_square_cover(
 
     if (not art_file.is_file() or art_file.stat().st_size == 0) and dl_url:
         try:
-            req = urllib.request.Request(dl_url, headers={"User-Agent": "musicctl/2.2"})
+            req = urllib.request.Request(dl_url, headers={"User-Agent": common.USER_AGENT})
             with urllib.request.urlopen(req, timeout=5.0) as resp:
                 data = resp.read()
             if data:

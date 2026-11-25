@@ -1,7 +1,7 @@
 # Maintainer: Zyekh Abdul <zyekhabdul@users.noreply.github.com>
 
 pkgname=musicctl
-pkgver=2.2.0
+pkgver=2.3.0
 pkgrel=1
 pkgdesc="Lightweight standalone YouTube Music CLI & TUI player (mpv + yt-dlp + fzf)"
 arch=('any')
