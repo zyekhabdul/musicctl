@@ -7,9 +7,10 @@
 set -uo pipefail
 
 SELF_BIN="$(readlink -f "${BASH_SOURCE[0]}")"
-MUSICCTL_VERSION="2.1.0"
+MUSICCTL_VERSION="2.2.0"
 MUSICCTL_CONFIG="${MUSICCTL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/config}"
 [[ -n "${MUSICCTL_QUALITY+x}" ]] && MUSICCTL_QUALITY_ENV=1
+[[ -n "${MUSICCTL_AUTOPLAY+x}" ]] && MUSICCTL_AUTOPLAY_ENV=1
 
 load_user_config() {
   [[ -f "$MUSICCTL_CONFIG" ]] || return 0
@@ -29,9 +30,10 @@ load_user_config() {
     fi
     case "$key" in
       MUSICCTL_SOCKET|MUSICCTL_DATA_DIR|MUSICCTL_CACHE_DIR|MUSICCTL_CACHE|\
-      MUSICCTL_DOWNLOAD_DIR|MUSICCTL_NOTIFY|MUSICCTL_ART|MUSICCTL_ART_FORMAT|\
-      MUSICCTL_EQ|MUSICCTL_NORM|MUSICCTL_QUALITY|MUSICCTL_PROVIDERS_DIR|\
-      MUSICCTL_TUI|MUSICCTL_MPV_EXTRA_ARGS)
+      MUSICCTL_DOWNLOAD_DIR|MUSICCTL_DL_TEMPLATE|MUSICCTL_NOTIFY|MUSICCTL_ART|MUSICCTL_ART_FORMAT|\
+      MUSICCTL_EQ|MUSICCTL_NORM|MUSICCTL_QUALITY|MUSICCTL_PROVIDERS_DIR|MUSICCTL_HOOKS_DIR|\
+      MUSICCTL_TUI|MUSICCTL_MPV_EXTRA_ARGS|MUSICCTL_CATALOG|\
+      MUSICCTL_YTM_COOKIES|MUSICCTL_REPLAYGAIN|MUSICCTL_SPONSORBLOCK|MUSICCTL_AUTOPLAY)
         if [[ -z "${!key+x}" ]]; then
           printf -v "$key" '%s' "$val"
         fi
@@ -53,10 +55,12 @@ PLAYLIST_DIR="$MUSICCTL_DATA_DIR/playlists"
 SLEEP_STATE="$MUSICCTL_DATA_DIR/sleep.state"
 AUDIO_STATE="$MUSICCTL_DATA_DIR/audio.state"
 QUALITY_STATE="$MUSICCTL_DATA_DIR/quality.state"
+AUTOPLAY_STATE="$MUSICCTL_DATA_DIR/autoplay.state"
 SESSION_FILE="$MUSICCTL_DATA_DIR/session.json"
 MPV_LOG="$MUSICCTL_DATA_DIR/mpv.log"
 MUSICCTL_MPV_EXTRA_ARGS="${MUSICCTL_MPV_EXTRA_ARGS:-}"
 MUSICCTL_DOWNLOAD_DIR="${MUSICCTL_DOWNLOAD_DIR:-$HOME/Music/musicctl}"
+MUSICCTL_DL_TEMPLATE="${MUSICCTL_DL_TEMPLATE:-}"
 MUSICCTL_CACHE="${MUSICCTL_CACHE:-0}"
 MUSICCTL_NOTIFY="${MUSICCTL_NOTIFY:-1}"
 MUSICCTL_ART="${MUSICCTL_ART:-1}"
@@ -65,7 +69,13 @@ MUSICCTL_EQ="${MUSICCTL_EQ:-flat}"
 MUSICCTL_NORM="${MUSICCTL_NORM:-0}"
 MUSICCTL_QUALITY="${MUSICCTL_QUALITY:-cd}"
 MUSICCTL_PROVIDERS_DIR="${MUSICCTL_PROVIDERS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/providers}"
+MUSICCTL_HOOKS_DIR="${MUSICCTL_HOOKS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/musicctl/hooks}"
 MUSICCTL_TUI="${MUSICCTL_TUI:-auto}"
+MUSICCTL_CATALOG="${MUSICCTL_CATALOG:-ytm}"
+MUSICCTL_YTM_COOKIES="${MUSICCTL_YTM_COOKIES:-}"
+MUSICCTL_REPLAYGAIN="${MUSICCTL_REPLAYGAIN:-track}"
+MUSICCTL_SPONSORBLOCK="${MUSICCTL_SPONSORBLOCK:-0}"
+MUSICCTL_AUTOPLAY="${MUSICCTL_AUTOPLAY:-0}"
 
 # ANSI Styling Tokens (Tokyo Night Theme, matching gamectl)
 UI_RST=$'\033[0m'
@@ -156,6 +166,80 @@ run_common_py() {
   python3 "$cp" "$@"
 }
 
+catalog_py_path() {
+  if [[ -n "${MUSICCTL_CATALOG_PY:-}" && -f "$MUSICCTL_CATALOG_PY" ]]; then
+    printf '%s' "$MUSICCTL_CATALOG_PY"
+    return 0
+  fi
+  MUSICCTL_CATALOG_PY="$(find_lib_file "catalog.py")" || die "Missing shared module: catalog.py"
+  printf '%s' "$MUSICCTL_CATALOG_PY"
+}
+
+run_catalog_py() {
+  local cp
+  cp="$(catalog_py_path)" || return 1
+  python3 "$cp" "$@"
+}
+
+providers_py_path() {
+  if [[ -n "${MUSICCTL_PROVIDERS_PY:-}" && -f "$MUSICCTL_PROVIDERS_PY" ]]; then
+    printf '%s' "$MUSICCTL_PROVIDERS_PY"
+    return 0
+  fi
+  MUSICCTL_PROVIDERS_PY="$(find_lib_file "providers.py")" || die "Missing shared module: providers.py"
+  printf '%s' "$MUSICCTL_PROVIDERS_PY"
+}
+
+run_providers_py() {
+  local pp
+  pp="$(providers_py_path)" || return 1
+  MUSICCTL_PROVIDERS_DIR="$MUSICCTL_PROVIDERS_DIR" python3 "$pp" "$@"
+}
+
+downloader_py_path() {
+  if [[ -n "${MUSICCTL_DOWNLOADER_PY:-}" && -f "$MUSICCTL_DOWNLOADER_PY" ]]; then
+    printf '%s' "$MUSICCTL_DOWNLOADER_PY"
+    return 0
+  fi
+  MUSICCTL_DOWNLOADER_PY="$(find_lib_file "downloader.py")" || die "Missing shared module: downloader.py"
+  printf '%s' "$MUSICCTL_DOWNLOADER_PY"
+}
+
+run_downloader_py() {
+  local dp eff_q
+  dp="$(downloader_py_path)" || return 1
+  eff_q="${1:-}"
+  shift || true
+  MUSICCTL_DATA_DIR="$MUSICCTL_DATA_DIR" \
+  MUSICCTL_CACHE_DIR="$MUSICCTL_CACHE_DIR" \
+  MUSICCTL_DOWNLOAD_DIR="$MUSICCTL_DOWNLOAD_DIR" \
+  MUSICCTL_PROVIDERS_DIR="$MUSICCTL_PROVIDERS_DIR" \
+  MUSICCTL_HOOKS_DIR="$MUSICCTL_HOOKS_DIR" \
+  MUSICCTL_SOCKET="$MUSICCTL_SOCKET" \
+  MUSICCTL_DL_TEMPLATE="${MUSICCTL_DL_TEMPLATE:-}" \
+  MUSICCTL_YTM_COOKIES="$MUSICCTL_YTM_COOKIES" \
+  MUSICCTL_SPONSORBLOCK="$MUSICCTL_SPONSORBLOCK" \
+  MUSICCTL_QUALITY="$eff_q" \
+    python3 "$dp" "$@"
+}
+
+library_py_path() {
+  if [[ -n "${MUSICCTL_LIBRARY_PY:-}" && -f "$MUSICCTL_LIBRARY_PY" ]]; then
+    printf '%s' "$MUSICCTL_LIBRARY_PY"
+    return 0
+  fi
+  MUSICCTL_LIBRARY_PY="$(find_lib_file "library.py")" || die "Missing shared module: library.py"
+  printf '%s' "$MUSICCTL_LIBRARY_PY"
+}
+
+run_library_py() {
+  local lp
+  lp="$(library_py_path)" || return 1
+  MUSICCTL_DOWNLOAD_DIR="$MUSICCTL_DOWNLOAD_DIR" \
+  MUSICCTL_CACHE_DIR="$MUSICCTL_CACHE_DIR" \
+    python3 "$lp" "$@"
+}
+
 mpv_ipc() {
   local payload="$1"
   [[ -S "$MUSICCTL_SOCKET" ]] || return 1
@@ -206,6 +290,59 @@ find_mpris_script() {
   return 1
 }
 
+replaygain_mode_get() {
+  case "${MUSICCTL_REPLAYGAIN:-track}" in
+    track|album|no) printf '%s' "$MUSICCTL_REPLAYGAIN" ;;
+    *) printf 'track' ;;
+  esac
+}
+
+mpv_supports_soxr() {
+  local opts
+  opts="$(mpv --list-options 2>/dev/null || true)"
+  [[ "$opts" == *"--audio-swresample-o"* ]] || return 1
+  if command -v ffmpeg >/dev/null 2>&1; then
+    local conf
+    conf="$(ffmpeg -buildconf 2>/dev/null || true)"
+    [[ "$conf" == *"enable-libsoxr"* ]] || return 1
+  fi
+  return 0
+}
+
+build_ytdl_raw_options() {
+  local opts="ignore-config=,no-playlist=,no-update="
+  if [[ -n "${MUSICCTL_YTM_COOKIES:-}" ]]; then
+    if [[ -f "$MUSICCTL_YTM_COOKIES" ]]; then
+      opts+=",cookies=${MUSICCTL_YTM_COOKIES}"
+    else
+      opts+=",cookies-from-browser=${MUSICCTL_YTM_COOKIES}"
+    fi
+  fi
+  printf '%s' "$opts"
+}
+
+build_mpv_audiophile_args() {
+  printf -- '--replaygain=%s\n' "$(replaygain_mode_get)"
+  if mpv_supports_soxr; then
+    printf -- '--audio-swresample-o=resampler=soxr,precision=28\n'
+  fi
+  printf -- '--ytdl-format=%s\n' "$(ytm_format_for_quality "$(quality_state_get)")"
+  printf -- '--ytdl-raw-options=%s\n' "$(build_ytdl_raw_options)"
+}
+
+ytdl_extra_cli_args() {
+  if [[ -n "${MUSICCTL_YTM_COOKIES:-}" ]]; then
+    if [[ -f "$MUSICCTL_YTM_COOKIES" ]]; then
+      printf '%s\n%s\n' "--cookies" "$MUSICCTL_YTM_COOKIES"
+    else
+      printf '%s\n%s\n' "--cookies-from-browser" "$MUSICCTL_YTM_COOKIES"
+    fi
+  fi
+  if [[ "${MUSICCTL_SPONSORBLOCK:-0}" == "1" ]]; then
+    printf '%s\n%s\n' "--sponsorblock-remove" "music_offtopic"
+  fi
+}
+
 ensure_daemon() {
   init_storage
   if daemon_alive; then
@@ -214,7 +351,6 @@ ensure_daemon() {
 
   rm -f "$MUSICCTL_SOCKET"
 
-  # shellcheck disable=SC2054
   local -a args=(
     --no-video
     --idle=yes
@@ -224,11 +360,13 @@ ensure_daemon() {
     --gapless-audio=yes
     --audio-pitch-correction=yes
     --volume-max=130
-    --replaygain=track
     --input-ipc-server="$MUSICCTL_SOCKET"
-    --ytdl-format="$(ytm_format_for_quality "$(quality_state_get)")"
-    --ytdl-raw-options=ignore-config=,no-playlist=,no-update=
   )
+
+  local arg_line
+  while IFS= read -r arg_line; do
+    [[ -n "$arg_line" ]] && args+=("$arg_line")
+  done < <(build_mpv_audiophile_args)
 
   local cur_eq cur_norm af_chain
   IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
@@ -241,6 +379,19 @@ ensure_daemon() {
   mpris_path="$(find_mpris_script || true)"
   if [[ -n "$mpris_path" ]]; then
     args+=(--script="$mpris_path")
+  fi
+
+  local hooks_path=""
+  hooks_path="$(find_lib_file "mpv_hooks.lua" || true)"
+  if [[ -n "$hooks_path" ]]; then
+    args+=(
+      --script="$hooks_path"
+      --script-opts-append="musicctl_hooks-bin=$SELF_BIN"
+      --script-opts-append="musicctl_hooks-common=$(common_py_path)"
+      --script-opts-append="musicctl_hooks-sponsorblock=$MUSICCTL_SPONSORBLOCK"
+      --script-opts-append="musicctl_hooks-data_dir=$MUSICCTL_DATA_DIR"
+      --script-opts-append="musicctl_hooks-hooks_dir=$MUSICCTL_HOOKS_DIR"
+    )
   fi
 
   if [[ -n "$MUSICCTL_MPV_EXTRA_ARGS" ]]; then
@@ -332,6 +483,310 @@ ytm_search() {
   fi
 
   [[ -n "$parsed" ]] && printf '%s\n' "$parsed"
+}
+
+cmd_search() {
+  local cat="${MUSICCTL_CATALOG:-ytm}" stype="songs" json_mode=0
+  while (($# > 0)); do
+    case "$1" in
+      --catalog|-c)
+        cat="${2:-}"
+        shift 2 || die "Usage: musicctl search [--catalog ytm|deezer|itunes] [--type songs|albums|artists|playlists] [--json] <query>"
+        ;;
+      --catalog=*)
+        cat="${1#--catalog=}"
+        shift
+        ;;
+      --type|-t)
+        stype="${2:-}"
+        shift 2 || die "Usage: musicctl search [--catalog ytm|deezer|itunes] [--type songs|albums|artists|playlists] [--json] <query>"
+        ;;
+      --type=*)
+        stype="${1#--type=}"
+        shift
+        ;;
+      --json)
+        json_mode=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "Unknown search option: $1"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  local query="$*"
+  [[ -n "${query// }" ]] || die "Usage: musicctl search [--catalog ytm|deezer|itunes] [--type songs|albums|artists|playlists] [--json] <query>"
+  case "$cat" in
+    ytm|deezer|itunes) ;;
+    *) die "Unknown catalog '$cat' (valid: ytm, deezer, itunes)" ;;
+  esac
+  case "$stype" in
+    songs|albums|artists|playlists) ;;
+    *) die "Unknown search type '$stype' (valid: songs, albums, artists, playlists)" ;;
+  esac
+
+  if ((json_mode == 1)); then
+    run_catalog_py search --catalog "$cat" --type "$stype" --json "$query"
+    return $?
+  fi
+  if [[ "$cat" == "ytm" && "$stype" == "songs" ]]; then
+    local out=""
+    out="$(run_catalog_py search --catalog ytm --type songs "$query" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    ytm_search "$query"
+    return $?
+  fi
+  run_catalog_py search --catalog "$cat" --type "$stype" "$query"
+}
+
+cmd_browse() {
+  local mode="pretty" ref=""
+  while (($# > 0)); do
+    case "$1" in
+      --json) mode="json"; shift ;;
+      --tsv)  mode="tsv"; shift ;;
+      -*)     die "Usage: musicctl browse [--json|--tsv] <ref>" ;;
+      *)      ref="$1"; shift ;;
+    esac
+  done
+  [[ -n "$ref" ]] || die "Usage: musicctl browse [--json|--tsv] <ref>"
+
+  if [[ "$mode" == "json" ]]; then
+    run_catalog_py browse --json "$ref"
+    return $?
+  fi
+  if [[ "$mode" == "tsv" ]]; then
+    run_catalog_py browse --tsv "$ref"
+    return $?
+  fi
+
+  local bjson
+  bjson="$(run_catalog_py browse --json "$ref")" || die "Failed to browse: $ref"
+  local htype htitle hartist hyear
+  IFS=$'\x1f' read -r htype htitle hartist hyear <<<"$(
+    jq -r '[.entity.type, (.entity.title // ""), (.entity.artist // ""), (.entity.year // 0)] | map(tostring) | join("\u001f")' <<<"$bjson"
+  )"
+  printf '%s[%s]%s %s%s%s' "$UI_CYAN" "${htype^^}" "$UI_RST" "$UI_BOLD" "$htitle" "$UI_RST"
+  [[ -n "$hartist" && "$hartist" != "$htitle" ]] && printf ' %s— %s%s' "$UI_DIM" "$hartist" "$UI_RST"
+  ((hyear > 0)) 2>/dev/null && printf ' %s(%s)%s' "$UI_PURPLE" "$hyear" "$UI_RST"
+  printf '\n'
+
+  local idx=1 src itype iid ititle iartist idur iref dur_lbl
+  while IFS=$'\x1f' read -r src itype iid ititle iartist idur; do
+    [[ -n "$iid" ]] || continue
+    iref="${src}:${itype}:${iid}"
+    dur_lbl=""
+    ((idur > 0)) 2>/dev/null && dur_lbl=" • $(format_mmss "$idur")"
+    printf '%s%2d.%s %s%-36s%s %s%s%s%s %s(%s)%s\n' \
+      "$UI_CYAN" "$idx" "$UI_RST" \
+      "$UI_BOLD" "${ititle:0:36}" "$UI_RST" \
+      "$UI_DIM" "${iartist:--}" "$dur_lbl" "$UI_RST" \
+      "$UI_PURPLE" "$iref" "$UI_RST"
+    ((idx++))
+  done < <(jq -r '.items[] | [.source, .type, .id, (.title // ""), (.artist // ""), (.duration // 0)] | map(tostring) | join("\u001f")' <<<"$bjson")
+}
+
+play_catalog_track() {
+  local action="$1" entity_json="$2"
+  local src eid title artist album isrc track_num year dur
+  IFS=$'\x1f' read -r src eid title artist album isrc track_num year dur <<<"$(
+    jq -r '[.source, .id, (.title // ""), (.artist // ""), (.album // ""), (.isrc // ""), (.track_num // 0), (.year // 0), (.duration // 0)] | map(tostring) | join("\u001f")' <<<"$entity_json"
+  )"
+  local dur_lbl="" meta=""
+  ((dur > 0)) 2>/dev/null && dur_lbl="$(format_mmss "$dur")"
+  [[ -n "$artist" ]] && meta="$artist"
+  [[ -n "$album" ]] && meta="${meta:+$meta • }$album"
+  [[ -n "$dur_lbl" ]] && meta="${meta:+$meta • }$dur_lbl"
+  [[ -n "$meta" ]] || meta="$src"
+
+  if [[ "$src" == "ytm" ]]; then
+    if [[ "$action" == "play" ]]; then
+      play_track "$eid" "$title" "$meta"
+    else
+      enqueue_track "$eid" "$title" "$meta"
+    fi
+    return 0
+  fi
+
+  local ref="${src}:song:${eid}" prov_json="" prov_url=""
+  if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$eid" "$title" "$artist" "$album" "$dur" "$isrc" "$track_num" "$year" "$src" 2>/dev/null)"; then
+    prov_url="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$prov_url" ]]; then
+    local mode hdr_arg payload
+    mode="append-play"
+    [[ "$action" == "play" ]] && mode="replace"
+    ensure_daemon
+    hdr_arg="$(format_mpv_header_fields <<<"$prov_json")"
+    payload="$(jq -cn --arg u "$prov_url" --arg m "$mode" --arg t "$title" --arg h "$hdr_arg" '
+      ((if $t != "" then {"force-media-title": $t} else {} end)
+        + (if $h != "" then {"http-header-fields": $h} else {} end)) as $opts
+      | if ($opts | length) > 0 then ["loadfile", $u, $m, -1, $opts] else ["loadfile", $u, $m] end
+    ')"
+    mpv_cmd "$payload" >/dev/null || die "Failed to load track: $prov_url"
+    if [[ "$action" == "play" ]]; then
+      mpv_cmd '["set_property", "pause", false]' >/dev/null 2>&1 || true
+      notify_track "$title" "$meta"
+    fi
+    record_history "$ref" "$title" "$meta"
+    return 0
+  fi
+
+  local q match yid _yt _ym
+  q="${artist:+$artist }$title"
+  match="$(ytm_search "$q" | head -n 1 || true)"
+  [[ -n "$match" ]] || return 1
+  IFS=$'\t' read -r yid _yt _ym <<<"$match"
+  [[ -n "$yid" ]] || return 1
+  if [[ "$action" == "play" ]]; then
+    play_track "$yid" "$title" "$meta"
+  else
+    enqueue_track "$yid" "$title" "$meta"
+  fi
+}
+
+play_catalog_ref() {
+  local action="$1" ref="$2"
+  local ref_json src etype eid
+  ref_json="$(run_catalog_py parse-ref "$ref" 2>/dev/null)" || return 1
+  IFS=$'\x1f' read -r src etype eid <<<"$(jq -r '[.source, .type, .id] | join("\u001f")' <<<"$ref_json")"
+
+  if [[ "$src" == "ytm" && "$etype" == "song" ]]; then
+    if [[ "$action" == "play" ]]; then
+      play_track "$eid" "$eid" "Video ID"
+      printf '%s[PLAY]%s %s\n' "$UI_GREEN" "$UI_RST" "$eid"
+    else
+      enqueue_track "$eid" "$eid" "Video ID"
+      printf '%s[OK]%s Queued: %s\n' "$UI_GREEN" "$UI_RST" "$eid"
+    fi
+    return 0
+  fi
+
+  local bjson btype btitle
+  bjson="$(run_catalog_py browse --json "$ref")" || die "Failed to browse catalog ref: $ref"
+  btype="$(jq -r '.entity.type // ""' <<<"$bjson")"
+  btitle="$(jq -r '.entity.title // ""' <<<"$bjson")"
+
+  if [[ "$btype" == "song" ]]; then
+    local ent_json
+    ent_json="$(jq -c '.entity' <<<"$bjson")"
+    play_catalog_track "$action" "$ent_json" || die "Could not resolve track: $ref"
+    if [[ "$action" == "play" ]]; then
+      printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$btitle" "$UI_DIM" "$ref" "$UI_RST"
+    else
+      printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$btitle" "$UI_DIM" "$ref" "$UI_RST"
+    fi
+    return 0
+  fi
+
+  local count=0 item_json item_act
+  while IFS= read -r item_json; do
+    [[ -n "$item_json" ]] || continue
+    item_act="add"
+    if [[ "$action" == "play" ]] && ((count == 0)); then
+      item_act="play"
+    fi
+    if play_catalog_track "$item_act" "$item_json"; then
+      ((count++))
+    fi
+  done < <(jq -c '.items[] | select(.type == "song")' <<<"$bjson")
+
+  ((count > 0)) || die "No playable tracks found in $ref"
+  if [[ "$action" == "play" ]]; then
+    printf '%s[PLAY]%s Loaded %d tracks from %s\n' "$UI_GREEN" "$UI_RST" "$count" "${btitle:-$ref}"
+  else
+    printf '%s[OK]%s Queued %d tracks from %s\n' "$UI_GREEN" "$UI_RST" "$count" "${btitle:-$ref}"
+  fi
+}
+
+play_universal_url() {
+  local action="$1" url="$2"
+  local rows count=0 u t m
+  rows="$(yt-dlp --ignore-config --flat-playlist --no-update --print $'%(webpage_url|url)s\t%(title)s\t%(artist,uploader)s • %(duration_string)s' "$url" 2>/dev/null || true)"
+  if [[ -n "$rows" ]]; then
+    while IFS=$'\t' read -r u t m; do
+      [[ -n "$u" ]] || continue
+      [[ -n "$t" ]] || t="$u"
+      if [[ "$action" == "play" ]] && ((count == 0)); then
+        play_track "$u" "$t" "${m:-Direct URL}"
+      else
+        enqueue_track "$u" "$t" "${m:-Direct URL}"
+      fi
+      ((count++))
+    done <<<"$rows"
+  fi
+  if ((count == 0)); then
+    if [[ "$action" == "play" ]]; then
+      play_track "$url" "$url" "Direct URL"
+    else
+      enqueue_track "$url" "$url" "Direct URL"
+    fi
+    count=1
+  fi
+  if [[ "$action" == "play" ]]; then
+    printf '%s[PLAY]%s Loaded %d item(s) from %s\n' "$UI_GREEN" "$UI_RST" "$count" "$url"
+  else
+    printf '%s[OK]%s Queued %d item(s) from %s\n' "$UI_GREEN" "$UI_RST" "$count" "$url"
+  fi
+}
+
+cmd_play_or_add() {
+  local action="$1"
+  shift
+  local input="$*"
+  if [[ ! -f "$input" ]]; then
+    if [[ "$input" == pl:* ]]; then
+      local pl_name="${input#pl:}" pf pid ptitle pmeta qcnt=0
+      pl_validate_name "$pl_name"
+      pf="$(pl_file "$pl_name")"
+      [[ -s "$pf" ]] || die "Playlist '$pl_name' is empty or not found"
+      if [[ "$action" == "play" ]]; then
+        cmd_playlist play "$pl_name"
+        return 0
+      fi
+      while IFS=$'\t' read -r pid ptitle pmeta; do
+        [[ -n "$pid" ]] || continue
+        enqueue_track "$pid" "$ptitle" "$pmeta"
+        ((qcnt++))
+      done <"$pf"
+      printf '%s[OK]%s Queued %d track(s) from playlist %s\n' "$UI_GREEN" "$UI_RST" "$qcnt" "$pl_name"
+      return 0
+    fi
+    if [[ "$input" =~ ^https?://open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+) ]]; then
+      play_spotify_collection "$action" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$input"
+      return 0
+    fi
+    if [[ "$input" =~ ^https?://([^/]+\.)?(soundcloud\.com|bandcamp\.com)/ ]]; then
+      play_universal_url "$action" "$input"
+      return 0
+    fi
+    if run_catalog_py parse-ref "$input" >/dev/null 2>&1; then
+      play_catalog_ref "$action" "$input"
+      return 0
+    fi
+  fi
+  local resolved id title meta
+  resolved="$(resolve_input "$input")" || die "No results found for: $input"
+  IFS=$'\t' read -r id title meta <<<"$resolved"
+  if [[ "$action" == "play" ]]; then
+    play_track "$id" "$title" "$meta"
+    printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+  else
+    enqueue_track "$id" "$title" "$meta"
+    printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
+  fi
 }
 
 extract_video_id() {
@@ -450,11 +905,17 @@ cache_audio_bg() {
   mkdir "$lock_dir" 2>/dev/null || return 0
   local ytdl_fmt
   ytdl_fmt="$(ytm_format_for_quality "$(quality_state_get)")"
+  local -a ytdl_extra=()
+  local _ye
+  while IFS= read -r _ye; do
+    [[ -n "$_ye" ]] && ytdl_extra+=("$_ye")
+  done < <(ytdl_extra_cli_args)
   setsid bash -c '
-    trap "rmdir \"$3\" 2>/dev/null || true" EXIT
-    yt-dlp --ignore-config --no-playlist --no-update -q -f "$4" -x --audio-format best --audio-quality 0 --embed-metadata \
-      -o "$2/$1.%(ext)s" "https://www.youtube.com/watch?v=$1" >/dev/null 2>&1
-  ' _ "$id" "$CACHE_AUDIO_DIR" "$lock_dir" "$ytdl_fmt" </dev/null >/dev/null 2>&1 &
+    id="$1"; dir="$2"; lock="$3"; fmt="$4"; shift 4
+    trap "rmdir \"$lock\" 2>/dev/null || true" EXIT
+    yt-dlp --ignore-config --no-playlist --no-update -q -f "$fmt" "$@" -x --audio-format best --audio-quality 0 --embed-metadata \
+      -o "$dir/$id.%(ext)s" "https://www.youtube.com/watch?v=$id" >/dev/null 2>&1
+  ' _ "$id" "$CACHE_AUDIO_DIR" "$lock_dir" "$ytdl_fmt" "${ytdl_extra[@]}" </dev/null >/dev/null 2>&1 &
   disown "$!" 2>/dev/null || true
 }
 
@@ -465,30 +926,7 @@ format_mpv_header_fields() {
 probe_provider_stream() {
   local prov_url="${1:-}" prov_json="${2:-}"
   [[ -n "$prov_url" ]] || return 1
-  if [[ "$prov_url" == file://* ]]; then
-    [[ -s "${prov_url#file://}" ]]
-    return $?
-  elif [[ "$prov_url" == /* ]]; then
-    [[ -s "$prov_url" ]]
-    return $?
-  fi
-  local -a curl_args=()
-  local h_line code
-  if [[ -n "$prov_json" ]]; then
-    while IFS= read -r h_line; do
-      [[ -n "$h_line" ]] && curl_args+=(-H "$h_line")
-    done < <(jq -r '(.headers // {}) | to_entries[] | "\(.key): \(.value)"' <<<"$prov_json" 2>/dev/null || true)
-  fi
-  code="$(curl -sSL -m 3 -I -o /dev/null -w '%{http_code}' "${curl_args[@]}" "$prov_url" 2>/dev/null || true)"
-  if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
-    return 0
-  fi
-  if [[ "$code" == "405" || "$code" == "501" ]]; then
-    code="$(curl -sSL -m 3 -r 0-0 -o /dev/null -w '%{http_code}' "${curl_args[@]}" "$prov_url" 2>/dev/null || true)"
-    [[ "$code" =~ ^2[0-9][0-9]$ ]]
-    return $?
-  fi
-  return 1
+  run_providers_py probe-stream "$prov_url" "$prov_json" >/dev/null 2>&1
 }
 
 load_track_target() {
@@ -497,19 +935,14 @@ load_track_target() {
   if cached="$(find_cached_audio "$id" 2>/dev/null)"; then
     target="$cached"
   else
-    local artist="" dur_s="0" cand_json="" cand_url=""
+    local artist="" album="" dur_s="0"
     artist="$(parse_meta_artist "$meta")"
+    album="$(parse_meta_album "$meta")"
     dur_s="$(parse_meta_duration "$meta")"
-    while IFS= read -r cand_json; do
-      [[ -n "$cand_json" ]] || continue
-      cand_url="$(jq -r '.url // empty' <<<"$cand_json" 2>/dev/null || true)"
-      if [[ -n "$cand_url" ]] && probe_provider_stream "$cand_url" "$cand_json"; then
-        prov_json="$cand_json"
-        prov_url="$cand_url"
-        target="$prov_url"
-        break
-      fi
-    done < <(resolve_provider_candidates "stream" "$(quality_state_get)" "$id" "$title" "$artist" "" "$dur_s" 2>/dev/null || true)
+    if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$id" "$title" "$artist" "$album" "$dur_s" 2>/dev/null)"; then
+      prov_url="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
+      [[ -n "$prov_url" ]] && target="$prov_url"
+    fi
     if [[ -z "$prov_url" ]]; then
       target="$(id_to_url "$id")"
     fi
@@ -932,6 +1365,86 @@ cmd_norm() {
   esac
 }
 
+autoplay_state_get() {
+  local a="$MUSICCTL_AUTOPLAY"
+  if [[ -z "${MUSICCTL_AUTOPLAY_ENV:-}" && -f "$AUTOPLAY_STATE" ]]; then
+    local fa
+    read -r fa <"$AUTOPLAY_STATE" 2>/dev/null || true
+    [[ -n "${fa:-}" ]] && a="$fa"
+  fi
+  [[ "$a" == "1" ]] || a="0"
+  printf '%s' "$a"
+}
+
+autoplay_state_set() {
+  init_storage
+  printf '%s\n' "$1" >"$AUTOPLAY_STATE"
+}
+
+cmd_autoplay() {
+  local arg="${1:-status}"
+  local cur_a
+  cur_a="$(autoplay_state_get)"
+  case "$arg" in
+    status)
+      printf '%s[INFO]%s Infinite autoplay: %s\n' "$UI_CYAN" "$UI_RST" "$([[ "$cur_a" == "1" ]] && printf 'on' || printf 'off')"
+      ;;
+    toggle)
+      local next="1"
+      [[ "$cur_a" == "1" ]] && next="0"
+      autoplay_state_set "$next"
+      printf '%s[OK]%s Infinite autoplay: %s\n' "$UI_GREEN" "$UI_RST" "$([[ "$next" == "1" ]] && printf 'on' || printf 'off')"
+      ;;
+    on|1|true)
+      autoplay_state_set "1"
+      printf '%s[OK]%s Infinite autoplay: on\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    off|0|false)
+      autoplay_state_set "0"
+      printf '%s[OK]%s Infinite autoplay: off\n' "$UI_GREEN" "$UI_RST"
+      ;;
+    *)
+      die "Usage: musicctl autoplay [on|off|toggle|status]"
+      ;;
+  esac
+}
+
+cmd_internal_autoplay_seed() {
+  local seed_vid="${1:-}"
+  [[ "$(autoplay_state_get)" == "1" ]] || return 0
+  [[ "$seed_vid" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 0
+  daemon_alive || return 0
+  [[ "$(get_loop_mode)" == "off" ]] || return 0
+
+  local qpos qcount
+  qpos="$(mpv_get "playlist-pos" || echo "-1")"
+  qcount="$(mpv_get "playlist-count" || echo "0")"
+  [[ "$qpos" =~ ^-?[0-9]+$ && "$qcount" =~ ^[0-9]+$ ]] || return 0
+  ((qcount >= 1 && qpos >= qcount - 1)) || return 0
+
+  init_storage
+  local lock_dir="$MUSICCTL_DATA_DIR/.autoplay.lock"
+  mkdir "$lock_dir" 2>/dev/null || return 0
+  trap 'rmdir "${MUSICCTL_DATA_DIR}/.autoplay.lock" 2>/dev/null || true' RETURN
+
+  local existing_ids fn
+  existing_ids="$(mpv_get_json "playlist" 2>/dev/null | jq -r '.[]?.filename // empty' 2>/dev/null | while IFS= read -r fn; do extract_video_id "$fn"; printf '\n'; done)"
+
+  local tracks rid rtitle rmeta added=0
+  tracks="$(ytm_radio_fetch "$seed_vid" || true)"
+  [[ -n "$tracks" ]] || return 0
+  while IFS=$'\t' read -r rid rtitle rmeta; do
+    [[ "$rid" =~ ^[A-Za-z0-9_-]{11}$ && "$rid" != "$seed_vid" ]] || continue
+    if grep -qxF -- "$rid" <<<"$existing_ids" 2>/dev/null; then
+      continue
+    fi
+    enqueue_track "$rid" "$rtitle" "$rmeta"
+    existing_ids+=$'\n'"$rid"
+    ((added++))
+    ((added >= 5)) && break
+  done <<<"$tracks"
+}
+
 # ------------------------------------------------------------------------------
 # 3-Tier Quality, Pluggable Providers & Audio Integrity Verification
 # ------------------------------------------------------------------------------
@@ -958,7 +1471,7 @@ quality_state_set() {
 ytm_format_for_quality() {
   case "${1:-cd}" in
     small) printf '%s' '249/250/139/bestaudio[abr<=96]/bestaudio/best' ;;
-    *)     printf '%s' '251/bestaudio[acodec=opus]/bestaudio/best' ;;
+    *)     printf '%s' '774/251/141/bestaudio[acodec=opus]/bestaudio/best' ;;
   esac
 }
 
@@ -1021,61 +1534,55 @@ parse_meta_artist() {
     artist="${artist%"${artist##*[![:space:]]}"}"
   fi
   case "$artist" in
-    ""|"Video ID"|"Direct URL"|"Local File"|"Local Audio"|"Now Playing") artist="" ;;
+    ""|"Video ID"|"Direct URL"|"Local File"|"Local Audio"|"Now Playing"|"Album"|"Single"|"EP"|"Playlist"|"Artist") artist="" ;;
   esac
   printf '%s' "$artist"
 }
 
-resolve_provider_candidates() {
-  local mode="${1:-download}" quality="${2:-cd}" id="${3:-}" title="${4:-}" artist="${5:-}" album="${6:-}" duration="${7:-0}"
-  [[ -d "$MUSICCTL_PROVIDERS_DIR" ]] || return 1
-  local dur_num="${duration%.*}"
-  [[ "$dur_num" =~ ^[0-9]+$ ]] || dur_num=0
-  local req_json
-  req_json="$(jq -cn \
-    --arg id "$id" \
-    --arg title "$title" \
-    --arg artist "$artist" \
-    --arg album "$album" \
-    --argjson duration "$dur_num" \
-    --arg quality "$quality" \
-    --arg mode "$mode" \
-    '{id:$id,title:$title,artist:$artist,album:$album,duration:$duration,quality:$quality,mode:$mode}')"
-
-  local -a providers=()
-  while IFS= read -r p; do
-    [[ -n "$p" ]] && providers+=("$p")
-  done < <(LC_ALL=C find "$MUSICCTL_PROVIDERS_DIR" -maxdepth 1 \( -type f -o -type l \) -perm /111 2>/dev/null | LC_ALL=C sort)
-
-  local p out normalized pname found=0
-  for p in "${providers[@]}"; do
-    [[ -x "$p" ]] || continue
-    out="$(printf '%s\n' "$req_json" | timeout 8 "$p" 2>/dev/null || true)"
-    [[ -n "${out// }" ]] || continue
-    pname="$(basename "$p")"
-    if normalized="$(jq -ce --arg prov "$pname" '
-      select(type == "object" and (.url | type) == "string" and (.url | test("^(https?://|file://|/)")))
-      | {
-          provider: (.provider // $prov),
-          url: .url,
-          codec: (.codec // ""),
-          bit_depth: (.bit_depth // 0),
-          sample_rate: (.sample_rate // 0),
-          headers: (if (.headers | type) == "object" then .headers else {} end)
-        }
-    ' <<<"$out" 2>/dev/null)"; then
-      printf '%s\n' "$normalized"
-      found=1
-    fi
+parse_meta_album() {
+  local meta="${1:-}"
+  [[ "$meta" == *"•"* ]] || return 0
+  local -a parts=()
+  local rem="$meta" seg
+  while [[ "$rem" == *"•"* ]]; do
+    seg="${rem%%•*}"
+    seg="${seg#"${seg%%[![:space:]]*}"}"
+    seg="${seg%"${seg##*[![:space:]]}"}"
+    parts+=("$seg")
+    rem="${rem#*•}"
   done
-  ((found == 1))
+  rem="${rem#"${rem%%[![:space:]]*}"}"
+  rem="${rem%"${rem##*[![:space:]]}"}"
+  parts+=("$rem")
+
+  ((${#parts[@]} >= 2)) || return 0
+  case "${parts[0]}" in
+    "Album"|"Single"|"EP"|"Playlist"|"Artist") return 0 ;;
+  esac
+  local cand="${parts[1]}"
+  if [[ -z "$cand" ]] \
+    || [[ "$cand" =~ ^[0-9]+:[0-9]{2}(:[0-9]{2})?$ ]] \
+    || [[ "$cand" =~ ^(19|20)[0-9]{2}$ ]] \
+    || [[ "$cand" =~ ^[0-9]+([.,][0-9]+)?[KkMmBbTt]?([[:space:]]+(plays?|views?|songs?|tracks?))?$ ]]; then
+    return 0
+  fi
+  case "$cand" in
+    "Video ID"|"Direct URL"|"Local File"|"Local Audio"|"Now Playing"|"Album"|"Single"|"EP"|"Playlist"|"Artist"|"Active"|"Queued")
+      return 0
+      ;;
+  esac
+  printf '%s' "$cand"
+}
+
+clean_track_title() {
+  local raw="${1:-}" cleaned=""
+  [[ -n "$raw" ]] || return 0
+  cleaned="$(run_common_py clean-title "$raw" 2>/dev/null || true)"
+  printf '%s' "${cleaned:-$raw}"
 }
 
 resolve_provider_audio() {
-  local first
-  first="$(resolve_provider_candidates "$@" | head -n 1 || true)"
-  [[ -n "$first" ]] || return 1
-  printf '%s\n' "$first"
+  run_providers_py resolve-first "$@"
 }
 
 validate_audio_file() {
@@ -1083,102 +1590,16 @@ validate_audio_file() {
   local expected_dur="${2:-0}"
   local require_lossless="${3:-0}"
   local require_hires="${4:-0}"
-  [[ -s "$file_path" ]] || return 1
-  command -v ffprobe >/dev/null 2>&1 || return 1
-  local probe_json
-  probe_json="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name,sample_rate,bits_per_raw_sample,bits_per_sample:format=duration -of json "$file_path" 2>/dev/null || true)"
-  [[ -n "$probe_json" ]] || return 1
-  python3 -c '
-import json
-import sys
-
-exp_dur = float(sys.argv[1] or 0)
-req_lossless = sys.argv[2] == "1"
-req_hires = sys.argv[3] == "1"
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-
-streams = data.get("streams") or []
-if not streams:
-    sys.exit(1)
-st = streams[0]
-codec = str(st.get("codec_name") or "").lower()
-if not codec:
-    sys.exit(1)
-
-is_lossless = codec in ("flac", "alac", "wav") or codec.startswith("pcm_")
-if (req_lossless or req_hires) and not is_lossless:
-    sys.exit(1)
-
-srate = int(st.get("sample_rate") or 0)
-bits = int(st.get("bits_per_raw_sample") or st.get("bits_per_sample") or 0)
-if req_hires and not (bits >= 24 or srate > 48000):
-    sys.exit(1)
-
-dur = float((data.get("format") or {}).get("duration") or 0.0)
-
-if exp_dur > 0:
-    if dur <= 0 or dur < (exp_dur - 5.0) or dur > (exp_dur + 15.0):
-        sys.exit(1)
-
-print(json.dumps({
-    "codec": codec,
-    "bit_depth": bits,
-    "sample_rate": srate,
-    "duration": round(dur, 3),
-}))
-' "$expected_dur" "$require_lossless" "$require_hires" <<<"$probe_json"
+  run_providers_py validate-audio "$file_path" "$expected_dur" "$require_lossless" "$require_hires"
 }
 
 fetch_validated_provider_audio() {
-  local eff_q="$1" id="$2" title="$3" artist="$4" album="$5" dur_s="$6" tmp_dir="$7"
-  local req_lossless=0
-  [[ "$eff_q" == "cd" || "$eff_q" == "hires" ]] && req_lossless=1
-
-  local cand_json cand_url cand_raw cand_info bits srate
-  local fb_raw="" fb_info="" fb_json=""
-  while IFS= read -r cand_json; do
-    [[ -n "$cand_json" ]] || continue
-    cand_url="$(jq -r '.url // empty' <<<"$cand_json" 2>/dev/null || true)"
-    [[ -n "$cand_url" ]] || continue
-    cand_raw="$(mktemp "$tmp_dir/.prov.XXXXXX")"
-    if fetch_provider_target "$cand_url" "$cand_json" "$cand_raw" \
-      && cand_info="$(validate_audio_file "$cand_raw" "$dur_s" "$req_lossless" 0 2>/dev/null)"; then
-      if [[ "$eff_q" == "hires" ]]; then
-        bits="$(jq -r '.bit_depth // 0' <<<"$cand_info")"
-        srate="$(jq -r '.sample_rate // 0' <<<"$cand_info")"
-        if ((bits >= 24 || srate > 48000)); then
-          [[ -n "$fb_raw" ]] && rm -f "$fb_raw"
-          printf '%s\n%s\n%s\n' "$cand_raw" "$cand_info" "$cand_json"
-          return 0
-        fi
-        if [[ -z "$fb_raw" ]]; then
-          fb_raw="$cand_raw"
-          fb_info="$cand_info"
-          fb_json="$cand_json"
-        else
-          rm -f "$cand_raw"
-        fi
-        continue
-      fi
-      printf '%s\n%s\n%s\n' "$cand_raw" "$cand_info" "$cand_json"
-      return 0
-    fi
-    rm -f "$cand_raw"
-  done < <(resolve_provider_candidates "download" "$eff_q" "$id" "$title" "$artist" "$album" "$dur_s" 2>/dev/null || true)
-
-  if [[ -n "$fb_raw" ]]; then
-    printf '%s\n%s\n%s\n' "$fb_raw" "$fb_info" "$fb_json"
-    return 0
-  fi
-  return 1
+  local eff_q="$1" id="$2" title="$3" artist="$4" album="$5" dur_s="$6" tmp_dir="$7" isrc="${8:-}" track_num="${9:-0}" year="${10:-0}"
+  run_providers_py fetch-validated "$eff_q" "$id" "$title" "$artist" "$album" "$dur_s" "$tmp_dir" "$isrc" "$track_num" "$year"
 }
 
 embed_metadata_cover() {
-  local src_file="$1" out_file="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}"
+  local src_file="$1" out_file="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}" track_num="${7:-0}" year="${8:-0}" isrc="${9:-}"
   command -v ffmpeg >/dev/null 2>&1 || { cp -f "$src_file" "$out_file"; return 0; }
   local ext="${out_file##*.}"
   ext="${ext,,}"
@@ -1193,6 +1614,9 @@ embed_metadata_cover() {
   [[ -n "$title" ]] && cmd+=(-metadata "title=$title")
   [[ -n "$artist" ]] && cmd+=(-metadata "artist=$artist")
   [[ -n "$album" ]] && cmd+=(-metadata "album=$album")
+  [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && cmd+=(-metadata "track=$track_num")
+  [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && cmd+=(-metadata "date=$year")
+  [[ -n "$isrc" ]] && cmd+=(-metadata "isrc=$isrc")
   cmd+=("$out_file")
   if ! "${cmd[@]}" 2>/dev/null; then
     if ((has_cover == 1)); then
@@ -1200,6 +1624,9 @@ embed_metadata_cover() {
       [[ -n "$title" ]] && fb_cmd+=(-metadata "title=$title")
       [[ -n "$artist" ]] && fb_cmd+=(-metadata "artist=$artist")
       [[ -n "$album" ]] && fb_cmd+=(-metadata "album=$album")
+      [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && fb_cmd+=(-metadata "track=$track_num")
+      [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && fb_cmd+=(-metadata "date=$year")
+      [[ -n "$isrc" ]] && fb_cmd+=(-metadata "isrc=$isrc")
       fb_cmd+=("$out_file")
       "${fb_cmd[@]}" 2>/dev/null || cp -f "$src_file" "$out_file"
     else
@@ -1209,7 +1636,7 @@ embed_metadata_cover() {
 }
 
 transcode_small_audio() {
-  local src_file="$1" out_m4a="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}"
+  local src_file="$1" out_m4a="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}" track_num="${7:-0}" year="${8:-0}" isrc="${9:-}"
   command -v ffmpeg >/dev/null 2>&1 || return 1
   local -a cmd=(ffmpeg -y -v error -i "$src_file")
   if [[ -n "$cover_file" && -s "$cover_file" ]]; then
@@ -1220,6 +1647,9 @@ transcode_small_audio() {
   [[ -n "$title" ]] && cmd+=(-metadata "title=$title")
   [[ -n "$artist" ]] && cmd+=(-metadata "artist=$artist")
   [[ -n "$album" ]] && cmd+=(-metadata "album=$album")
+  [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && cmd+=(-metadata "track=$track_num")
+  [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && cmd+=(-metadata "date=$year")
+  [[ -n "$isrc" ]] && cmd+=(-metadata "isrc=$isrc")
   cmd+=(-movflags +faststart "$out_m4a")
   "${cmd[@]}" 2>/dev/null
 }
@@ -1648,10 +2078,11 @@ PY
           ((skipped++))
           continue
         fi
-        local artist="" dur_s="0" prov_saved=0 prov_res=""
+        local artist="" album="" dur_s="0" prov_saved=0 prov_res=""
         artist="$(parse_meta_artist "$meta")"
+        album="$(parse_meta_album "$meta")"
         dur_s="$(parse_meta_duration "$meta")"
-        if prov_res="$(fetch_validated_provider_audio "$eff_q" "$id" "$title" "$artist" "" "$dur_s" "$CACHE_AUDIO_DIR")"; then
+        if prov_res="$(fetch_validated_provider_audio "$eff_q" "$id" "$title" "$artist" "$album" "$dur_s" "$CACHE_AUDIO_DIR")"; then
           local p_raw="" p_info="" _p_json="" p_codec p_ext
           {
             IFS= read -r p_raw
@@ -1665,9 +2096,13 @@ PY
           ((fetched++))
         fi
         if ((prov_saved == 0)); then
-          local yfmt
+          local yfmt _ye
+          local -a ytdl_extra=()
           yfmt="$(ytm_format_for_quality "$eff_q")"
-          if yt-dlp --ignore-config --no-playlist --no-update -q -f "$yfmt" -x --audio-format best --audio-quality 0 --embed-metadata \
+          while IFS= read -r _ye; do
+            [[ -n "$_ye" ]] && ytdl_extra+=("$_ye")
+          done < <(ytdl_extra_cli_args)
+          if yt-dlp --ignore-config --no-playlist --no-update -q -f "$yfmt" "${ytdl_extra[@]}" -x --audio-format best --audio-quality 0 --embed-metadata \
             -o "$CACHE_AUDIO_DIR/$id.%(ext)s" "https://www.youtube.com/watch?v=$id" >/dev/null 2>&1; then
             ((fetched++))
           else
@@ -1875,6 +2310,7 @@ cmd_lyrics() {
     uploader="$(mpv_get "metadata/by-key/uploader" || true)"
     duration="$(mpv_get "duration" || echo "0")"
     [[ -n "$title" ]] || die "Cannot determine current track title"
+    title="$(clean_track_title "$title")"
 
     artist="$(run_common_py primary-artist "$artist" "$uploader")"
 
@@ -1956,28 +2392,28 @@ sanitize_filename() {
   printf '%s' "$1" | tr '/\0\t\r\n' '     ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
 }
 
-fetch_provider_target() {
-  local prov_url="$1" prov_json="$2" out_file="$3"
-  if [[ "$prov_url" == file://* ]]; then
-    local local_src="${prov_url#file://}"
-    [[ -s "$local_src" ]] && cp -f "$local_src" "$out_file"
-  elif [[ "$prov_url" == /* ]]; then
-    [[ -s "$prov_url" ]] && cp -f "$prov_url" "$out_file"
-  else
-    local -a curl_args=(-sSL -m 60 -o "$out_file")
-    local h_line
-    while IFS= read -r h_line; do
-      [[ -n "$h_line" ]] && curl_args+=(-H "$h_line")
-    done < <(jq -r '(.headers // {}) | to_entries[] | "\(.key): \(.value)"' <<<"$prov_json" 2>/dev/null || true)
-    curl "${curl_args[@]}" "$prov_url" 2>/dev/null
-  fi
-}
-
 ensure_cover_file() {
   local id="$1"
-  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
+  local cover_url="${2:-}"
   init_storage
-  local art_file="$CACHE_ART_DIR/${id}.jpg"
+  local safe_id="${id//[^A-Za-z0-9_-]/_}"
+  [[ -n "$safe_id" ]] || return 1
+  local art_file="$CACHE_ART_DIR/${safe_id}.jpg"
+  if [[ -n "$cover_url" ]]; then
+    if [[ ! -s "$art_file" ]]; then
+      local tmp
+      tmp="$(mktemp "$CACHE_ART_DIR/art.XXXXXX")"
+      if curl -sSL -m 5 -o "$tmp" "$cover_url" 2>/dev/null && [[ -s "$tmp" ]]; then
+        mv -f "$tmp" "$art_file"
+      else
+        rm -f "$tmp"
+        return 1
+      fi
+    fi
+    printf '%s' "$art_file"
+    return 0
+  fi
+  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
   if [[ ! -s "$art_file" ]]; then
     local tmp
     tmp="$(mktemp "$CACHE_ART_DIR/art.XXXXXX")"
@@ -1992,118 +2428,72 @@ ensure_cover_file() {
 }
 
 cmd_download() {
-  mkdir -p "$MUSICCTL_DOWNLOAD_DIR"
-  local req_q=""
+  local eff_q has_q_flag=0 req_ask=0
+  eff_q="$(quality_state_get)"
+  local -a dl_args=()
   while (($# > 0)); do
     case "$1" in
       --quality|-q)
-        req_q="${2:-}"
-        shift 2 || die "Usage: musicctl dl [--quality <small|cd|hires|ask>] [current|query|id|url]"
+        has_q_flag=1
+        if [[ "${2:-}" == "ask" ]]; then
+          req_ask=1
+          dl_args+=("$1" "")
+          shift 2 || { dl_args=("$@"); break; }
+          continue
+        fi
+        dl_args+=("$1")
+        if (($# >= 2)); then
+          dl_args+=("$2")
+          shift 2
+        else
+          shift
+        fi
         ;;
       --quality=*)
-        req_q="${1#--quality=}"
+        has_q_flag=1
+        if [[ "${1#--quality=}" == "ask" ]]; then
+          req_ask=1
+          dl_args+=("--quality=")
+        else
+          dl_args+=("$1")
+        fi
         shift
         ;;
       *)
-        break
+        dl_args+=("$1")
+        shift
         ;;
     esac
   done
 
-  local eff_q="${req_q:-$(quality_state_get)}"
-  if [[ "$eff_q" == "ask" ]]; then
+  local first_pos="${dl_args[0]:-}"
+  if [[ "$first_pos" != "status" && "$first_pos" != "cancel" ]] && { ((req_ask == 1)) || { ((has_q_flag == 0)) && [[ "$eff_q" == "ask" ]]; }; }; then
+    local chosen="cd"
     if [[ -t 0 ]]; then
       printf 'Select quality [1=small, 2=cd (default), 3=hires]: ' >/dev/tty 2>/dev/null || true
       local choice=""
       read -r choice </dev/tty 2>/dev/null || true
       case "$choice" in
-        1|small) eff_q="small" ;;
-        3|hires) eff_q="hires" ;;
-        *)       eff_q="cd" ;;
+        1|small) chosen="small" ;;
+        3|hires) chosen="hires" ;;
+        *)       chosen="cd" ;;
       esac
+    fi
+    if ((req_ask == 1)); then
+      local i
+      for ((i=0; i<${#dl_args[@]}; i++)); do
+        if [[ "${dl_args[$i]}" == "--quality=" ]]; then
+          dl_args[i]="--quality=$chosen"
+        elif [[ ("${dl_args[$i]}" == "--quality" || "${dl_args[$i]}" == "-q") && -z "${dl_args[$((i+1))]:-}" ]]; then
+          dl_args[i+1]="$chosen"
+        fi
+      done
     else
-      eff_q="cd"
-    fi
-  fi
-  case "$eff_q" in
-    small|cd|hires) ;;
-    *) die "Unknown quality tier '$eff_q' (valid: small, cd, hires, ask)" ;;
-  esac
-
-  local url="" id="" title="" artist="" meta="" dur_s="0"
-  if (($# == 0)) || [[ "${1:-}" == "current" ]]; then
-    daemon_alive || die "No active player; pass <query|id|url>"
-    local idle path
-    idle="$(mpv_get "idle-active" || echo "true")"
-    [[ "$idle" == "false" ]] || die "Nothing currently playing"
-    path="$(mpv_get "path" || true)"
-    id="$(extract_video_id "$path")"
-    url="$(id_to_url "$id")"
-    title="$(mpv_get "media-title" || true)"
-    [[ -n "$title" && "$title" != "$id" ]] || title=""
-    artist="$(mpv_get "metadata/by-key/artist" || true)"
-    [[ -n "$artist" ]] || artist="$(mpv_get "metadata/by-key/uploader" || true)"
-    dur_s="$(mpv_get "duration" || echo "0")"
-    dur_s="${dur_s%.*}"
-    [[ "$dur_s" =~ ^[0-9]+$ ]] || dur_s=0
-  else
-    local resolved
-    resolved="$(resolve_input "$*")" || die "No results found for: $*"
-    IFS=$'\t' read -r id title meta <<<"$resolved"
-    url="$(id_to_url "$id")"
-    artist="$(parse_meta_artist "$meta")"
-    dur_s="$(parse_meta_duration "$meta")"
-  fi
-
-  local cover_file=""
-  cover_file="$(ensure_cover_file "$id" 2>/dev/null || true)"
-
-  local prov_res=""
-  if prov_res="$(fetch_validated_provider_audio "$eff_q" "$id" "${title:-$id}" "$artist" "" "$dur_s" "$MUSICCTL_DOWNLOAD_DIR")"; then
-    local raw_tmp="" info_json="" prov_json="" out_tmp="" codec srate bits ext base_name dest_file prov_name
-    {
-      IFS= read -r raw_tmp
-      IFS= read -r info_json
-      IFS= read -r prov_json
-    } <<<"$prov_res"
-    codec="$(jq -r '.codec' <<<"$info_json")"
-    srate="$(jq -r '.sample_rate' <<<"$info_json")"
-    bits="$(jq -r '.bit_depth' <<<"$info_json")"
-    prov_name="$(jq -r '.provider' <<<"$prov_json")"
-    base_name="$(sanitize_filename "${artist:+$artist - }${title:-$id}")"
-    [[ -n "$base_name" ]] || base_name="$id"
-    if [[ "$eff_q" == "small" ]] && [[ "$codec" == "flac" || "$codec" == "alac" || "$codec" == "wav" || "$codec" == pcm* ]]; then
-      local orig_codec="$codec"
-      ext="m4a"
-      out_tmp="$(mktemp "$MUSICCTL_DOWNLOAD_DIR/.out.XXXXXX.$ext")"
-      if transcode_small_audio "$raw_tmp" "$out_tmp" "${title:-$id}" "$artist" "" "$cover_file"; then
-        codec="aac (from $orig_codec)"
-      else
-        rm -f "$out_tmp"
-        out_tmp=""
-      fi
-    else
-      ext="$(ext_for_codec "$codec")"
-      out_tmp="$(mktemp "$MUSICCTL_DOWNLOAD_DIR/.out.XXXXXX.$ext")"
-      embed_metadata_cover "$raw_tmp" "$out_tmp" "${title:-$id}" "$artist" "" "$cover_file"
-    fi
-    rm -f "$raw_tmp"
-    if [[ -n "${out_tmp:-}" && -s "$out_tmp" ]]; then
-      dest_file="$MUSICCTL_DOWNLOAD_DIR/${base_name} [${id}].${ext}"
-      mv -f "$out_tmp" "$dest_file"
-      printf '%s[OK]%s Downloaded (%s, %s, %sHz%s): %s\n' \
-        "$UI_GREEN" "$UI_RST" "$prov_name" "$codec" "$srate" \
-        "$([[ "$bits" -gt 0 ]] && printf ', %s-bit' "$bits")" "$dest_file"
-      return 0
+      eff_q="$chosen"
     fi
   fi
 
-  local yfmt
-  yfmt="$(ytm_format_for_quality "$eff_q")"
-  printf '%s[INFO]%s Downloading (%s) to %s\n' "$UI_CYAN" "$UI_RST" "$eff_q" "$MUSICCTL_DOWNLOAD_DIR"
-  yt-dlp --ignore-config --no-playlist --no-update -f "$yfmt" -x --audio-format best --audio-quality 0 --embed-metadata --embed-thumbnail \
-    -o "$MUSICCTL_DOWNLOAD_DIR/%(artist,uploader)s - %(title)s [%(id)s].%(ext)s" \
-    "$url"
+  run_downloader_py "$eff_q" "${dl_args[@]}"
 }
 
 list_local_files() {
@@ -2114,18 +2504,7 @@ list_local_files() {
 }
 
 cmd_local() {
-  local files
-  files="$(list_local_files)"
-  if [[ -z "$files" ]]; then
-    printf '%s[IDLE]%s No local audio files in %s\n' "$UI_DIM" "$UI_RST" "$MUSICCTL_DOWNLOAD_DIR"
-    return 0
-  fi
-  local idx=1 f
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    printf '%s%2d.%s %s\n' "$UI_CYAN" "$idx" "$UI_RST" "$(basename "$f")"
-    ((idx++))
-  done <<<"$files"
+  run_library_py "$@"
 }
 
 # ------------------------------------------------------------------------------
@@ -2340,10 +2719,14 @@ cmd_doctor() {
   if [[ -d "$MUSICCTL_PROVIDERS_DIR" ]]; then
     prov_cnt="$(find "$MUSICCTL_PROVIDERS_DIR" -maxdepth 1 \( -type f -o -type l \) -perm /111 2>/dev/null | wc -l | tr -d ' ')"
   fi
-  local fmt_lbl="251/Opus 48kHz"
+  local fmt_lbl="774/251/141 Opus/AAC"
   [[ "$cur_q" == "small" ]] && fmt_lbl="249/250/139 (<=96k)"
   printf '  %s[INFO]%s audio dsp    Quality=%s, Providers=%s, EQ=%s, Norm=%s, Format=%s\n' \
     "$UI_ICE" "$UI_RST" "$cur_q" "$prov_cnt" "$cur_eq" "$([[ "$cur_norm" == "1" ]] && printf 'on' || printf 'off')" "$fmt_lbl"
+  printf '  %s[INFO]%s engine       ReplayGain=%s, SponsorBlock=%s, Autoplay=%s\n' \
+    "$UI_ICE" "$UI_RST" "$(replaygain_mode_get)" \
+    "$([[ "$MUSICCTL_SPONSORBLOCK" == "1" ]] && printf 'on' || printf 'off')" \
+    "$([[ "$(autoplay_state_get)" == "1" ]] && printf 'on' || printf 'off')"
   if [[ -f "$HOME/.config/yt-dlp/config" ]] && grep -q 'cookies' "$HOME/.config/yt-dlp/config" 2>/dev/null; then
     printf '  %s[OK]%s   yt-dlp       --ignore-config active (bypasses global cookie downgrade)\n' "$UI_GREEN" "$UI_RST"
   fi
@@ -2430,9 +2813,11 @@ cmd_status() {
     json_mode=1
   fi
 
-  local sleep_rem="" cur_eq cur_norm norm_b="false" cur_q=""
+  local sleep_rem="" cur_eq cur_norm norm_b="false" cur_q="" auto_b="false" sb_b="false"
   IFS=: read -r cur_eq cur_norm <<<"$(audio_state_get)"
   [[ "$cur_norm" == "1" ]] && norm_b="true"
+  [[ "$(autoplay_state_get)" == "1" ]] && auto_b="true"
+  [[ "$MUSICCTL_SPONSORBLOCK" == "1" ]] && sb_b="true"
   cur_q="$(quality_state_get)"
   sleep_rem="$(sleep_remaining || true)"
 
@@ -2440,8 +2825,8 @@ cmd_status() {
   snap="$(mpv_batch_status_json 2>/dev/null || true)"
   if [[ -z "$snap" ]]; then
     if ((json_mode == 1)); then
-      jq -cn --arg sleep "$sleep_rem" --arg eq "$cur_eq" --argjson norm "$norm_b" --arg qual "$cur_q" \
-        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":false,"loop":"off","speed":1,"codec":"","samplerate":0,"sample_fmt":"","quality":$qual,"eq":$eq,"norm":$norm,"sleep":$sleep,"text":"[IDLE]"}'
+      jq -cn --arg sleep "$sleep_rem" --arg eq "$cur_eq" --argjson norm "$norm_b" --arg qual "$cur_q" --argjson auto "$auto_b" --argjson sb "$sb_b" \
+        '{"state":"idle","title":"","artist":"","album":"","year":0,"track_num":0,"isrc":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":false,"loop":"off","speed":1,"codec":"","samplerate":0,"sample_fmt":"","quality":$qual,"eq":$eq,"norm":$norm,"autoplay":$auto,"sponsorblock":$sb,"sleep":$sleep,"text":"[IDLE]"}'
     else
       printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
       [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
@@ -2449,15 +2834,15 @@ cmd_status() {
     return 0
   fi
 
-  local idle paused title pos dur vol muted_b speed_v speed_lbl qpos qcount loop_mode codec srate sfmt
-  IFS=$'\x1f' read -r idle paused title pos dur vol muted_b speed_v speed_lbl qpos qcount loop_mode codec srate sfmt <<<"$(
-    jq -r '[.idle, .paused, (.title | gsub("[\r\n\u001f]+"; " ")), .pos, .duration, .volume, .muted, .speed, .speed_label, .queue_pos, .queue_count, .loop, .codec, .samplerate, .sample_fmt] | map(tostring) | join("\u001f")' <<<"$snap"
+  local idle paused title artist album year track_num isrc pos dur vol muted_b speed_v speed_lbl qpos qcount loop_mode codec srate sfmt
+  IFS=$'\x1f' read -r idle paused title artist album year track_num isrc pos dur vol muted_b speed_v speed_lbl qpos qcount loop_mode codec srate sfmt <<<"$(
+    jq -r '[.idle, .paused, (.title | gsub("[\r\n\u001f]+"; " ")), (.artist // ""), (.album // ""), (.year // 0), (.track_num // 0), (.isrc // ""), .pos, .duration, .volume, .muted, .speed, .speed_label, .queue_pos, .queue_count, .loop, .codec, .samplerate, .sample_fmt] | map(tostring) | join("\u001f")' <<<"$snap"
   )"
 
   if [[ "$idle" == "true" ]]; then
     if ((json_mode == 1)); then
-      jq -cn --argjson muted "$muted_b" --arg loop "$loop_mode" --argjson speed "$speed_v" --arg eq "$cur_eq" --argjson norm "$norm_b" --arg qual "$cur_q" --arg sleep "$sleep_rem" \
-        '{"state":"idle","title":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":$muted,"loop":$loop,"speed":$speed,"codec":"","samplerate":0,"sample_fmt":"","quality":$qual,"eq":$eq,"norm":$norm,"sleep":$sleep,"text":"[IDLE]"}'
+      jq -cn --argjson muted "$muted_b" --arg loop "$loop_mode" --argjson speed "$speed_v" --arg eq "$cur_eq" --argjson norm "$norm_b" --arg qual "$cur_q" --argjson auto "$auto_b" --argjson sb "$sb_b" --arg sleep "$sleep_rem" \
+        '{"state":"idle","title":"","artist":"","album":"","year":0,"track_num":0,"isrc":"","pos":0,"duration":0,"volume":0,"queue_pos":0,"queue_count":0,"muted":$muted,"loop":$loop,"speed":$speed,"codec":"","samplerate":0,"sample_fmt":"","quality":$qual,"eq":$eq,"norm":$norm,"autoplay":$auto,"sponsorblock":$sb,"sleep":$sleep,"text":"[IDLE]"}'
     else
       printf '%s[IDLE]%s No track playing\n' "$UI_DIM" "$UI_RST"
       [[ -n "$sleep_rem" ]] && printf '  Sleep: %s\n' "$sleep_rem"
@@ -2481,6 +2866,11 @@ cmd_status() {
     jq -cn \
       --arg state "$state" \
       --arg title "$title" \
+      --arg artist "$artist" \
+      --arg album "$album" \
+      --argjson year "${year:-0}" \
+      --argjson track_num "${track_num:-0}" \
+      --arg isrc "$isrc" \
       --argjson pos "${pos:-0}" \
       --argjson duration "${dur:-0}" \
       --argjson volume "${vol:-100}" \
@@ -2495,9 +2885,11 @@ cmd_status() {
       --arg qual "$cur_q" \
       --arg eq "$cur_eq" \
       --argjson norm "$norm_b" \
+      --argjson auto "$auto_b" \
+      --argjson sb "$sb_b" \
       --arg sleep "$sleep_rem" \
       --arg text "$badge $title ($pos_s/$dur_s)" \
-      '{state:$state,title:$title,pos:$pos,duration:$duration,volume:$volume,queue_pos:$qpos,queue_count:$qcount,muted:$muted,loop:$loop,speed:$speed,codec:$codec,samplerate:$samplerate,sample_fmt:$sfmt,quality:$qual,eq:$eq,norm:$norm,sleep:$sleep,text:$text}'
+      '{state:$state,title:$title,artist:$artist,album:$album,year:$year,track_num:$track_num,isrc:$isrc,pos:$pos,duration:$duration,volume:$volume,queue_pos:$qpos,queue_count:$qcount,muted:$muted,loop:$loop,speed:$speed,codec:$codec,samplerate:$samplerate,sample_fmt:$sfmt,quality:$qual,eq:$eq,norm:$norm,autoplay:$auto,sponsorblock:$sb,sleep:$sleep,text:$text}'
   else
     local extras=""
     if [[ -n "$codec" ]]; then
@@ -2854,6 +3246,12 @@ cmd_tui() {
     MUSICCTL_NORM="$MUSICCTL_NORM" \
     MUSICCTL_QUALITY="$MUSICCTL_QUALITY" \
     MUSICCTL_PROVIDERS_DIR="$MUSICCTL_PROVIDERS_DIR" \
+    MUSICCTL_HOOKS_DIR="$MUSICCTL_HOOKS_DIR" \
+    MUSICCTL_CATALOG="$MUSICCTL_CATALOG" \
+    MUSICCTL_AUTOPLAY="$MUSICCTL_AUTOPLAY" \
+    MUSICCTL_SPONSORBLOCK="$MUSICCTL_SPONSORBLOCK" \
+    MUSICCTL_REPLAYGAIN="$MUSICCTL_REPLAYGAIN" \
+    MUSICCTL_YTM_COOKIES="$MUSICCTL_YTM_COOKIES" \
       exec python3 "$tui_py" "$@"
   fi
   cmd_fzf "$@"
@@ -2871,9 +3269,12 @@ ${UI_BOLD}USAGE${UI_RST}
   musicctl                        Launch clickable realtime Sovereign Dashboard
   musicctl tui [query]            Launch Dashboard (optionally preloaded with YTM search)
   musicctl fzf [query]            Launch legacy fzf cockpit (1s realtime ticker)
-  musicctl play <query|id|url|f>  Resolve track or local file and play immediately
-  musicctl add <query|id|url|f>   Resolve track or local file and append to queue
-  musicctl search <query>         Search YouTube Music via InnerTube (TSV)
+  musicctl play <q|id|ref|url|f>  Resolve track, album/playlist ref, or file and play
+  musicctl add <q|id|ref|url|f>   Resolve track, album/playlist ref, or file and enqueue
+  musicctl search [--catalog S] [--type T] [--json] <query>
+                                  Search catalogs (ytm|deezer|itunes)
+  musicctl browse [--json|--tsv] <ref>
+                                  Browse album, artist, or playlist entity
   musicctl radio [current|query]  Queue YTM Up Next Radio mix
   musicctl toggle | pause         Toggle play/pause
   musicctl next | prev            Next / previous track in queue
@@ -2887,14 +3288,16 @@ ${UI_BOLD}USAGE${UI_RST}
   musicctl quality [tier|cycle]   Set audio quality (small/cd/hires/ask)
   musicctl eq [preset|cycle]      Set EQ (flat/bass/warm/vocal/bright/rock)
   musicctl norm [on|off|toggle]   Toggle EBU R128 loudness normalization
+  musicctl autoplay [on|off|tgl]  Toggle infinite Up Next Radio autoplay
   musicctl speed <0.25..4|reset>  Set playback speed
   musicctl vol <N|+N|-N>          Set or adjust volume (0-130)
   musicctl seek <+N|-N|N>         Relative seek in seconds
   musicctl status [--json]        Show playback status (or Waybar JSON)
   musicctl queue                  List current mpv queue
   musicctl lyrics [--live] [q]    Fetch song lyrics via LRCLIB / Fallback (or live-sync)
-  musicctl dl [--quality T] [q]   Download track (FLAC/M4A/Opus) to \$MUSICCTL_DOWNLOAD_DIR
-  musicctl local                  List downloaded local audio files
+  musicctl dl [--quality T] [--format F] [target|sync]
+                                  Download track/album/playlist to \$MUSICCTL_DOWNLOAD_DIR
+  musicctl local [--by M] [q]     List/search local library (flat|artist|album, --rescan)
   musicctl pl <subcmd>            Playlists (ls/create/add/show/play/move/sync/import/rm/delete)
   musicctl sleep <min|off|status> Auto-stop sleep timer
   musicctl resume | save          Restore or snapshot queue & playback position
@@ -2963,6 +3366,30 @@ main() {
     _resolve_play_target)
       resolve_play_target "${1:-}"
       ;;
+    _parse_meta_album)
+      parse_meta_album "${1:-}"
+      ;;
+    _clean_title)
+      clean_track_title "${1:-}"
+      ;;
+    _autoplay_seed)
+      require_deps
+      cmd_internal_autoplay_seed "${1:-}"
+      ;;
+    _mpv_audiophile_args)
+      build_mpv_audiophile_args
+      ;;
+    _ytm_format)
+      ytm_format_for_quality "${1:-cd}"
+      printf '\n'
+      ;;
+    _build_af_chain)
+      build_af_chain "${1:-flat}" "${2:-0}"
+      printf '\n'
+      ;;
+    _parse_sponsorblock)
+      run_common_py parse-sponsorblock
+      ;;
     _view)
       cmd_internal_view "$@"
       ;;
@@ -3016,34 +3443,21 @@ main() {
       ;;
     search)
       require_deps
-      (($# > 0)) || die "Usage: musicctl search <query>"
-      ytm_search "$*"
+      cmd_search "$@"
+      ;;
+    browse)
+      require_deps
+      cmd_browse "$@"
       ;;
     play)
       require_deps
-      (($# > 0)) || die "Usage: musicctl play <query|id|url|file>"
-      if [[ "$*" =~ ^https?://open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+) ]]; then
-        play_spotify_collection "play" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$*"
-      else
-        local resolved id title meta
-        resolved="$(resolve_input "$*")" || die "No results found for: $*"
-        IFS=$'\t' read -r id title meta <<<"$resolved"
-        play_track "$id" "$title" "$meta"
-        printf '%s[PLAY]%s %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
-      fi
+      (($# > 0)) || die "Usage: musicctl play <query|id|ref|url|file>"
+      cmd_play_or_add "play" "$@"
       ;;
     add)
       require_deps
-      (($# > 0)) || die "Usage: musicctl add <query|id|url|file>"
-      if [[ "$*" =~ ^https?://open\.spotify\.com/(playlist|album)/([A-Za-z0-9]+) ]]; then
-        play_spotify_collection "add" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$*"
-      else
-        local resolved id title meta
-        resolved="$(resolve_input "$*")" || die "No results found for: $*"
-        IFS=$'\t' read -r id title meta <<<"$resolved"
-        enqueue_track "$id" "$title" "$meta"
-        printf '%s[OK]%s Queued: %s %s(%s)%s\n' "$UI_GREEN" "$UI_RST" "$title" "$UI_DIM" "$id" "$UI_RST"
-      fi
+      (($# > 0)) || die "Usage: musicctl add <query|id|ref|url|file>"
+      cmd_play_or_add "add" "$@"
       ;;
     radio)
       require_deps
@@ -3107,6 +3521,10 @@ main() {
       require_deps
       cmd_norm "$@"
       ;;
+    autoplay)
+      require_deps
+      cmd_autoplay "$@"
+      ;;
     speed)
       require_deps
       cmd_speed "$@"
@@ -3153,7 +3571,7 @@ main() {
       cmd_download "$@"
       ;;
     local)
-      cmd_local
+      cmd_local "$@"
       ;;
     pl|playlist)
       require_deps

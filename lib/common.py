@@ -7,8 +7,12 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from typing import Any
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -31,6 +35,7 @@ STATUS_PROPS = [
     "audio-codec-name",
     "audio-params/samplerate",
     "audio-params/format",
+    "metadata",
 ]
 
 SESSION_PROPS = [
@@ -87,6 +92,65 @@ def _norm_meta(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+_TITLE_NOISE_TAG_RE = re.compile(
+    r"\s*(?:\((?:official(?:\s+(?:music|lyric|audio))?\s*(?:video|audio|visualizer|mv|m/?v)?|lyric\s*video|lyrics?|visualizer|audio|m/?v|hd|hq|4k|uhd)\)|\[(?:official[^\]]*|lyric\s*video|lyrics?|visualizer|audio|m/?v|hd|hq|4k|uhd)\])",
+    re.IGNORECASE,
+)
+_TITLE_NOISE_TRAIL_RE = re.compile(
+    r"\s*(?:\||-)\s*official(?:\s+(?:music|lyric|audio))?\s*(?:video|audio|visualizer|mv)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_track_title(title: str) -> str:
+    """Strip YouTube upload noise like (Official Video) while keeping musical qualifiers."""
+    raw = (title or "").strip()
+    if not raw:
+        return ""
+    cleaned = raw
+    for _ in range(4):
+        prev = cleaned
+        cleaned = _TITLE_NOISE_TRAIL_RE.sub("", cleaned)
+        cleaned = _TITLE_NOISE_TAG_RE.sub("", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -|")
+        if cleaned == prev:
+            break
+    return cleaned or raw
+
+
+def extract_metadata_fields(metadata: Any) -> dict[str, Any]:
+    """Extract normalized artist, album, year, track_num, and isrc from mpv metadata."""
+    if not isinstance(metadata, dict):
+        return {"artist": "", "album": "", "year": 0, "track_num": 0, "isrc": ""}
+    lowered = {
+        str(k).lower(): str(v).strip()
+        for k, v in metadata.items()
+        if v is not None and str(v).strip()
+    }
+    artist = extract_primary_artist(metadata)
+    album = lowered.get("album", "")
+    year = 0
+    for yk in ("date", "year", "release_date", "originaldate"):
+        m = re.search(r"\b((?:19|20)\d{2})\b", lowered.get(yk, ""))
+        if m:
+            year = int(m.group(1))
+            break
+    track_num = 0
+    for tk in ("track", "tracknumber"):
+        m = re.match(r"^\s*(\d+)", lowered.get(tk, ""))
+        if m:
+            track_num = int(m.group(1))
+            break
+    isrc = lowered.get("isrc", "").upper()
+    return {
+        "artist": artist,
+        "album": album,
+        "year": year,
+        "track_num": track_num,
+        "isrc": isrc,
+    }
+
+
 def extract_primary_artist(metadata: Any) -> str:
     """Extract primary artist string from mpv metadata dict."""
     if not isinstance(metadata, dict):
@@ -111,7 +175,7 @@ def pick_best_lyrics_candidate(
     duration: float = 0.0,
 ) -> dict[str, Any] | None:
     """Score LRCLIB search results by artist, title, duration, and synced availability."""
-    n_title = _norm_meta(title)
+    n_title = _norm_meta(normalize_track_title(title))
     n_artist = _norm_meta(artist)
     best_score = -10**9
     best_item: dict[str, Any] | None = None
@@ -212,6 +276,96 @@ def parse_fallback_lyrics_json(
         return None
     hdr = f"{title} - {artist}" if artist else title
     return f"{hdr} [Fallback]", [(None, ln) for ln in body.splitlines()]
+
+
+def parse_sponsorblock_segments(
+    raw_json: str, categories: tuple[str, ...] = ("music_offtopic",)
+) -> list[dict[str, Any]]:
+    """Parse SponsorBlock skipSegments JSON, filtering >=0.5s and merging overlaps."""
+    if not raw_json or not raw_json.strip():
+        return []
+    try:
+        data = json.loads(raw_json)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    raw_segs: list[tuple[float, float, str]] = []
+    allowed = {c.lower() for c in categories}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        cat = str(entry.get("category") or "").strip().lower()
+        if allowed and cat not in allowed:
+            continue
+        seg = entry.get("segment")
+        if not isinstance(seg, (list, tuple)) or len(seg) < 2:
+            continue
+        try:
+            start = float(seg[0])
+            end = float(seg[1])
+        except (TypeError, ValueError):
+            continue
+        if start < 0 or end <= start or (end - start) < 0.5:
+            continue
+        raw_segs.append((start, end, cat))
+
+    if not raw_segs:
+        return []
+    raw_segs.sort(key=lambda x: x[0])
+
+    merged: list[dict[str, Any]] = []
+    cur_s, cur_e, cur_cat = raw_segs[0]
+    for s, e, cat in raw_segs[1:]:
+        if s <= cur_e + 0.1:
+            if e > cur_e:
+                cur_e = e
+        else:
+            merged.append({"start": round(cur_s, 3), "end": round(cur_e, 3), "category": cur_cat})
+            cur_s, cur_e, cur_cat = s, e, cat
+    merged.append({"start": round(cur_s, 3), "end": round(cur_e, 3), "category": cur_cat})
+    return merged
+
+
+def fetch_sponsorblock_segments(video_id: str, timeout: float = 2.0) -> list[dict[str, Any]]:
+    """Fetch SponsorBlock music_offtopic segments for a YouTube video ID."""
+    if not VIDEO_ID_RE.match(video_id or ""):
+        return []
+    url = (
+        "https://sponsor.ajay.app/api/skipSegments?"
+        + urllib.parse.urlencode(
+            {
+                "videoID": video_id,
+                "categories": json.dumps(["music_offtopic"]),
+            }
+        )
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "musicctl/2.2"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return parse_sponsorblock_segments(raw)
+    except Exception:
+        return []
+
+
+def should_trigger_autoplay(
+    autoplay_on: bool,
+    loop_mode: str,
+    queue_pos: int,
+    queue_count: int,
+    video_id: str,
+    last_seeded_id: str = "",
+) -> bool:
+    """Return True when Infinite Autoplay should enqueue related tracks."""
+    if not autoplay_on or loop_mode != "off":
+        return False
+    if queue_count < 1 or queue_pos < queue_count:
+        return False
+    if not VIDEO_ID_RE.match(video_id or "") or video_id == last_seeded_id:
+        return False
+    return True
 
 
 class MpvClient:
@@ -335,11 +489,17 @@ class MpvClient:
         qpos = (int(qpos_raw) + 1) if isinstance(qpos_raw, int) and qpos_raw >= 0 else 1
         qcount_raw = raw.get("playlist-count")
         qcount = int(qcount_raw) if isinstance(qcount_raw, int) and qcount_raw >= 0 else 1
+        meta_fields = extract_metadata_fields(raw.get("metadata"))
 
         return {
             "idle": bool(raw.get("idle-active") if raw.get("idle-active") is not None else True),
             "paused": bool(raw.get("pause") or False),
             "title": str(raw.get("media-title") or raw.get("filename") or "Unknown"),
+            "artist": meta_fields["artist"],
+            "album": meta_fields["album"],
+            "year": meta_fields["year"],
+            "track_num": meta_fields["track_num"],
+            "isrc": meta_fields["isrc"],
             "pos": float(raw.get("time-pos") or 0.0),
             "duration": float(raw.get("duration") or 0.0),
             "volume": int(round(float(raw.get("volume") or 100.0))),
@@ -432,6 +592,10 @@ def main(argv: list[str] | None = None) -> int:
         print(extract_primary_artist({"artist": args[1], "uploader": args[2]}))
         return 0
 
+    if cmd == "clean-title" and len(args) >= 2:
+        print(normalize_track_title(args[1]))
+        return 0
+
     if cmd == "pick-lyrics" and len(args) >= 4:
         try:
             items = json.load(sys.stdin)
@@ -482,7 +646,85 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(txt for _, txt in lines))
         return 0
 
+    if cmd == "parse-sponsorblock":
+        print(json.dumps(parse_sponsorblock_segments(sys.stdin.read())))
+        return 0
+
+    if cmd == "fetch-sponsorblock" and len(args) >= 2:
+        print(json.dumps(fetch_sponsorblock_segments(args[1])))
+        return 0
+
+    if cmd == "run-hook" and len(args) >= 2:
+        event = args[1]
+        hdir = args[2] if len(args) > 2 and args[2] else None
+        raw_payload = args[3] if len(args) > 3 else sys.stdin.read()
+        try:
+            payload = json.loads(raw_payload) if (raw_payload or "").strip() else {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        trigger_hooks(event, payload, hooks_dir=hdir, timeout=3.0)
+        return 0
+
     return 1
+
+
+def _discover_hook_scripts(base_dir: Path, event: str) -> list[Path]:
+    """Return executable hook scripts for an event (<dir>/<event> and <dir>/<event>.d/*)."""
+    if not base_dir.is_dir() or not event or "/" in event or "\\" in event:
+        return []
+    scripts: list[Path] = []
+    direct = base_dir / event
+    if (direct.is_file() or direct.is_symlink()) and os.access(direct, os.X_OK):
+        scripts.append(direct)
+    dropin = base_dir / f"{event}.d"
+    if dropin.is_dir():
+        try:
+            items = sorted(dropin.iterdir(), key=lambda p: p.name.encode("utf-8", errors="replace"))
+            for item in items:
+                if not item.is_dir() and (item.is_file() or item.is_symlink()) and os.access(item, os.X_OK):
+                    scripts.append(item)
+        except OSError:
+            pass
+    return scripts
+
+
+def trigger_hooks(
+    event: str,
+    payload: dict[str, Any],
+    hooks_dir: Path | str | None = None,
+    timeout: float = 3.0,
+) -> int:
+    """Invoke lifecycle hook executables with strict timeout; never raises or blocks caller."""
+    try:
+        raw_dir = str(hooks_dir) if hooks_dir else (os.environ.get("MUSICCTL_HOOKS_DIR") or "")
+        if not raw_dir:
+            raw_dir = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "musicctl", "hooks")
+        scripts = _discover_hook_scripts(Path(raw_dir), str(event or "").strip())
+        if not scripts:
+            return 0
+        body_obj = dict(payload or {})
+        body_obj["event"] = str(event)
+        body_obj["timestamp"] = int(time.time())
+        body = json.dumps(body_obj, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ran = 0
+        for script in scripts:
+            try:
+                subprocess.run(
+                    [str(script)],
+                    input=body,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=timeout,
+                )
+            except Exception:
+                pass
+            ran += 1
+        return ran
+    except Exception:
+        return 0
 
 
 if __name__ == "__main__":
