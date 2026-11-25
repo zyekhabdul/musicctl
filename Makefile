@@ -22,7 +22,7 @@ lint:
 		desktop-file-validate musicctl.desktop; \
 	fi; \
 	if command -v shellcheck >/dev/null 2>&1 && shellcheck --version >/dev/null 2>&1; then \
-		shellcheck -s bash -S error bin/musicctl install.sh tests/test_musicctl.sh; \
+		shellcheck -s bash -S warning bin/musicctl install.sh tests/test_musicctl.sh; \
 	elif [ "$${STRICT_LINT:-0}" = "1" ]; then \
 		echo "[FAIL] STRICT_LINT=1 requires working shellcheck in PATH" >&2; \
 		exit 1; \

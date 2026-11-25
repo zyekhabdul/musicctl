@@ -297,6 +297,7 @@ class SovereignDashboard:
         self.hitboxes: list[Hitbox] = []
         self.last_active_path = ""
         self.tick = 0
+        self._file_sigs: dict[str, tuple[int, int] | None] = {}
 
     def init_colors(self) -> None:
         curses.start_color()
@@ -384,21 +385,47 @@ class SovereignDashboard:
                 items.append((parts[0], parts[1], parts[2] if len(parts) > 2 else "", tag))
         return items
 
+    @staticmethod
+    def _file_sig(path: Path) -> tuple[int, int] | None:
+        try:
+            st = path.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return None
+
     def refresh_local_files_meta(self) -> None:
-        favs = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
-        self.fav_ids = {x[0] for x in favs}
+        sigs = getattr(self, "_file_sigs", None)
+        if sigs is None:
+            sigs = {}
+            self._file_sigs = sigs
+
+        fav_path = self.data_dir / "favorites.tsv"
+        fav_sig = self._file_sig(fav_path)
+        if fav_sig != sigs.get("fav", ...):
+            sigs["fav"] = fav_sig
+            favs = self.read_tsv(fav_path, "[FAV]")
+            self.fav_ids = {x[0] for x in favs}
+
         audio_state = self.data_dir / "audio.state"
-        if audio_state.is_file():
-            parts = audio_state.read_text(encoding="utf-8", errors="replace").strip().split(":")
-            if parts and parts[0]:
-                self.eq_mode = parts[0]
-            if len(parts) > 1:
-                self.norm_on = parts[1] == "1"
+        audio_sig = self._file_sig(audio_state)
+        if audio_sig != sigs.get("audio", ...):
+            sigs["audio"] = audio_sig
+            if audio_sig is not None:
+                parts = audio_state.read_text(encoding="utf-8", errors="replace").strip().split(":")
+                if parts and parts[0]:
+                    self.eq_mode = parts[0]
+                if len(parts) > 1:
+                    self.norm_on = parts[1] == "1"
+
         qual_state = self.data_dir / "quality.state"
-        if qual_state.is_file():
-            q_val = qual_state.read_text(encoding="utf-8", errors="replace").strip()
-            if q_val in ("small", "cd", "hires", "ask"):
-                self.quality_mode = q_val
+        qual_sig = self._file_sig(qual_state)
+        if qual_sig != sigs.get("qual", ...):
+            sigs["qual"] = qual_sig
+            if qual_sig is not None:
+                q_val = qual_state.read_text(encoding="utf-8", errors="replace").strip()
+                if q_val in ("small", "cd", "hires", "ask"):
+                    self.quality_mode = q_val
+
         sleep_file = self.data_dir / "sleep.state"
         if sleep_file.is_file():
             try:
@@ -494,7 +521,13 @@ class SovereignDashboard:
                 if any_updated and self.active_tab in ("home", "hist"):
                     self.load_tab_items()
 
-    def run_cli_async(self, args: list[str], toast: str = "", reload_after: bool = False) -> None:
+    def run_cli_async(
+        self,
+        args: list[str],
+        toast: str = "",
+        reload_after: bool = False,
+        timeout: float | None = 30.0,
+    ) -> None:
         def worker() -> None:
             msg = ""
             try:
@@ -503,7 +536,7 @@ class SovereignDashboard:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=30,
+                    timeout=timeout,
                 )
                 if proc.returncode == 0:
                     msg = toast
@@ -1324,12 +1357,13 @@ class SovereignDashboard:
         elif action == "add_sel":
             self.enqueue_selected()
         elif action == "radio_sel":
+            self.set_toast("Queueing YTM Radio...")
             if self.tracks and self.selected_idx < len(self.tracks):
                 vid = self.tracks[self.selected_idx][0]
                 if VIDEO_ID_RE.match(vid):
-                    self.run_cli_async(["radio", vid], toast="Queueing YTM Radio...", reload_after=True)
+                    self.run_cli_async(["radio", vid], toast="YTM Radio queued", reload_after=True)
                     return
-            self.run_cli_async(["radio", "current"], toast="Queueing YTM Radio...", reload_after=True)
+            self.run_cli_async(["radio", "current"], toast="YTM Radio queued", reload_after=True)
         elif action == "fav_sel":
             if self.tracks and self.selected_idx < len(self.tracks):
                 vid, title, meta, _tag = self.tracks[self.selected_idx]
@@ -1340,7 +1374,8 @@ class SovereignDashboard:
         elif action == "dl_sel":
             if self.tracks and self.selected_idx < len(self.tracks):
                 vid = self.tracks[self.selected_idx][0]
-                self.run_cli_async(["download", vid], toast=f"Downloading ({self.quality_mode})...")
+                self.set_toast(f"Downloading ({self.quality_mode})...")
+                self.run_cli_async(["download", vid], toast="Download complete", reload_after=True, timeout=300.0)
 
     def move_queue_selected(self, delta: int) -> None:
         if self.active_tab != "queue" or not self.tracks:

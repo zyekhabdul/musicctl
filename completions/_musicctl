@@ -29,7 +29,8 @@ _musicctl() {
     'status:Show playback status or Waybar JSON'
     'queue:List active mpv queue'
     'lyrics:Fetch lyrics via LRCLIB'
-    'download:Download Opus audio offline'
+    'download:Download audio offline (FLAC/M4A/Opus)'
+    'dl:Download audio offline (FLAC/M4A/Opus)'
     'local:List downloaded local audio files'
     'pl:Manage named local playlists'
     'sleep:Set or cancel auto-stop sleep timer'
@@ -93,6 +94,13 @@ _musicctl() {
       ;;
     norm)
       _values 'action' on off toggle status
+      ;;
+    dl|download)
+      if [[ "$words[CURRENT-1]" == "--quality" || "$words[CURRENT-1]" == "-q" ]]; then
+        _values 'tier' small cd hires ask
+      elif [[ "$words[CURRENT]" == -* ]]; then
+        _values 'option' --quality -q
+      fi
       ;;
     play|add)
       _files

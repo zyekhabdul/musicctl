@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import sys
+import time
 from typing import Any
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -30,6 +31,18 @@ STATUS_PROPS = [
     "audio-codec-name",
     "audio-params/samplerate",
     "audio-params/format",
+]
+
+SESSION_PROPS = [
+    "idle-active",
+    "playlist",
+    "playlist-pos",
+    "time-pos",
+    "volume",
+    "mute",
+    "loop-file",
+    "loop-playlist",
+    "speed",
 ]
 
 
@@ -341,6 +354,53 @@ class MpvClient:
             "sample_fmt": str(raw.get("audio-params/format") or ""),
         }
 
+    def batch_session_snapshot(self) -> dict[str, Any] | None:
+        """Query full playback session state in one IPC roundtrip."""
+        raw = self.batch_get(SESSION_PROPS)
+        if not raw or raw.get("idle-active") is not False:
+            return None
+
+        pl_raw = raw.get("playlist")
+        if not isinstance(pl_raw, list):
+            return None
+        playlist = [
+            entry["filename"]
+            for entry in pl_raw
+            if isinstance(entry, dict) and entry.get("filename")
+        ]
+        if not playlist:
+            return None
+
+        lf = str(raw.get("loop-file") or "")
+        lp = str(raw.get("loop-playlist") or "")
+        loop_mode = "one" if lf in ("inf", "True", "true") else ("all" if lp in ("inf", "True", "true") else "off")
+
+        try:
+            spd_f = float(raw.get("speed") if raw.get("speed") is not None else 1.0)
+        except (TypeError, ValueError):
+            spd_f = 1.0
+        spd: int | float = int(spd_f) if spd_f.is_integer() else spd_f
+
+        try:
+            vol_f = float(raw.get("volume") if raw.get("volume") is not None else 100.0)
+        except (TypeError, ValueError):
+            vol_f = 100.0
+        vol: int | float = int(vol_f) if vol_f.is_integer() else vol_f
+
+        muted_raw = raw.get("mute")
+        muted = muted_raw is True or str(muted_raw).lower() == "true"
+
+        return {
+            "playlist": playlist,
+            "playlist_pos": int(raw.get("playlist-pos") or 0),
+            "time_pos": float(raw.get("time-pos") or 0.0),
+            "volume": vol,
+            "muted": muted,
+            "loop": loop_mode,
+            "speed": spd,
+            "saved_at": int(time.time()),
+        }
+
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
@@ -356,6 +416,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "mpv-status" and len(args) >= 2:
         snap = MpvClient(args[1], timeout=0.8).batch_status_snapshot()
+        if snap is None:
+            return 1
+        print(json.dumps(snap))
+        return 0
+
+    if cmd == "mpv-session" and len(args) >= 2:
+        snap = MpvClient(args[1], timeout=1.0).batch_session_snapshot()
         if snap is None:
             return 1
         print(json.dumps(snap))

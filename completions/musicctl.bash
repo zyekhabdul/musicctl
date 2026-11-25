@@ -62,6 +62,13 @@ _musicctl_complete() {
     norm)
       COMPREPLY=( $(compgen -W "on off toggle status" -- "$cur") )
       ;;
+    dl|download)
+      if [[ "$prev" == "--quality" || "$prev" == "-q" ]]; then
+        COMPREPLY=( $(compgen -W "small cd hires ask" -- "$cur") )
+      elif [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "--quality -q" -- "$cur") )
+      fi
+      ;;
     play|add)
       COMPREPLY=( $(compgen -f -- "$cur") )
       ;;
