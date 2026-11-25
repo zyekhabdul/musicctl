@@ -618,7 +618,7 @@ class SovereignDashboard:
             lines: list[tuple[float | None, str]] = []
             try:
                 chosen: dict[str, Any] | None = None
-                headers = {"User-Agent": "musicctl/2.0"}
+                headers = {"User-Agent": "musicctl/2.1"}
 
                 # 1. Exact /api/get match when artist metadata is available
                 if artist:
@@ -818,7 +818,7 @@ class SovereignDashboard:
 
     def render_header(self, w: int) -> None:
         self.safe_addstr(0, 0, " " * w, curses.color_pair(PAIR_PILL_BTN))
-        brand = " MUSICCTL v2.0 "
+        brand = " MUSICCTL v2.1 "
         self.safe_addstr(0, 0, brand, curses.color_pair(PAIR_PILL_ACTIVE) | curses.A_BOLD)
         cx = len(brand) + 1
         for key, lbl in self.TABS:
@@ -1160,7 +1160,7 @@ class SovereignDashboard:
 
     def render_help_modal(self, h: int, w: int) -> None:
         lines = [
-            "MUSICCTL v2.0 - CONTROLS",
+            "MUSICCTL v2.1 - CONTROLS",
             "",
             "Mouse:",
             "  Click track row       Select track",

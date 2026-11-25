@@ -4,7 +4,7 @@ Lightweight, standalone YouTube Music CLI & TUI player modeled after `gamectl`.
 Streams ad-free audio via InnerTube (`WEB_REMIX`) + `yt-dlp` + background `mpv` IPC daemon + **clickable realtime Sovereign Dashboard** (~20-30 MB RAM, zero Electron).
 
 ```text
- MUSICCTL v2.0   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local         [PLAY] OPUS 48kHz
+ MUSICCTL v2.1   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local         [PLAY] OPUS 48kHz
  Search: [ pamungkas to the bone        ]  [Search] [Clear]
 ╭─ 1 Home (12) ─────────────────────────╮╭─ NOW PLAYING ──────────────────────────────────────╮
 │▸ 1.* To the Bone — Pamungkas    [FAV] ││ [ART]  To the Bone                                │

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.1.0 (2026-11-25)
 
 - Added queue and named playlist track reordering (`musicctl move`, `musicctl pl move`, and TUI `J`/`K` + `Move Up`/`Move Down` buttons).
 - Added offline playlist smart-sync (`musicctl pl sync [--quality <tier>] [--prune]`).
