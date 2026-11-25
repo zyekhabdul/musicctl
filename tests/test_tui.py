@@ -1829,7 +1829,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertEqual(res["source"], "lrclib")
         self.assertEqual(res["synced_lines"], [(5.0, "First line"), (10.0, "Second line")])
         self.assertIn("=== Monolog - Pamungkas ===", common_mod.format_lyrics_plain(res))
-        self.assertEqual(seen_ua, ["musicctl/2.2"])
+        self.assertEqual(seen_ua, ["musicctl/2.3"])
 
         # 2. /api/get 404 -> /api/search fallback
         seen_ua.clear()
@@ -1852,7 +1852,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertIsNotNone(res2)
         assert res2 is not None
         self.assertEqual(res2["plain_text"], "Plain body")
-        self.assertTrue(all(ua == "musicctl/2.2" for ua in seen_ua))
+        self.assertTrue(all(ua == "musicctl/2.3" for ua in seen_ua))
 
         # 3. LRCLIB empty -> lyrics.ovh fallback
         seen_ua.clear()
@@ -1872,7 +1872,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertEqual(res3["source"], "fallback")
         self.assertEqual(res3["plain_text"], "Fallback line")
         self.assertIn("[Fallback]", common_mod.format_lyrics_plain(res3))
-        self.assertTrue(all(ua == "musicctl/2.2" for ua in seen_ua))
+        self.assertTrue(all(ua == "musicctl/2.3" for ua in seen_ua))
 
     def test_mpv_client_batch_loadfile_and_resume_live_isolated(self):
         with tempfile.TemporaryDirectory(prefix="musicctl-p1-") as tmp:
