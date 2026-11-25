@@ -209,7 +209,7 @@ assert_ok "daemon socket cleaned up" test ! -S "$MUSICCTL_SOCKET"
 
 # 10. Version, doctor, config precedence, synced lyrics JSON, and auto-cache resolution
 VER_OUT="$("$BIN" --version)"
-assert_contains "version prints 2.1.0" "$VER_OUT" "musicctl 2.1.0"
+assert_contains "version prints 2.2.0" "$VER_OUT" "musicctl 2.2.0"
 
 DOC_OUT="$("$BIN" doctor)"
 assert_contains "doctor checks mpv" "$DOC_OUT" "mpv"
@@ -286,14 +286,24 @@ PREFIX_TMP="$TMP_DIR/prefix"
 assert_ok "install.sh dry install" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" >/dev/null
 assert_ok "installed bin exists" test -x "$PREFIX_TMP/bin/musicctl"
 assert_ok "installed common.py exists" test -f "$PREFIX_TMP/share/musicctl/common.py"
+assert_ok "installed catalog.py exists" test -f "$PREFIX_TMP/share/musicctl/catalog.py"
+assert_ok "installed providers.py exists" test -f "$PREFIX_TMP/share/musicctl/providers.py"
+assert_ok "installed downloader.py exists" test -f "$PREFIX_TMP/share/musicctl/downloader.py"
+assert_ok "installed library.py exists" test -f "$PREFIX_TMP/share/musicctl/library.py"
 assert_ok "installed tui.py exists" test -f "$PREFIX_TMP/share/musicctl/tui.py"
+assert_ok "installed mpv_hooks.lua exists" test -f "$PREFIX_TMP/share/musicctl/mpv_hooks.lua"
 assert_ok "installed desktop exists" test -f "$PREFIX_TMP/share/applications/musicctl.desktop"
 PREFIX_STATUS="$("$PREFIX_TMP/bin/musicctl" status --json)"
 assert_ok "installed prefix status json valid" jq -e '.state == "idle"' <<<"$PREFIX_STATUS" >/dev/null
 assert_ok "install.sh uninstall" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" --uninstall >/dev/null
 assert_ok "installed bin removed" test ! -e "$PREFIX_TMP/bin/musicctl"
 assert_ok "installed common.py removed" test ! -e "$PREFIX_TMP/share/musicctl/common.py"
+assert_ok "installed catalog.py removed" test ! -e "$PREFIX_TMP/share/musicctl/catalog.py"
+assert_ok "installed providers.py removed" test ! -e "$PREFIX_TMP/share/musicctl/providers.py"
+assert_ok "installed downloader.py removed" test ! -e "$PREFIX_TMP/share/musicctl/downloader.py"
+assert_ok "installed library.py removed" test ! -e "$PREFIX_TMP/share/musicctl/library.py"
 assert_ok "installed tui.py removed" test ! -e "$PREFIX_TMP/share/musicctl/tui.py"
+assert_ok "installed mpv_hooks.lua removed" test ! -e "$PREFIX_TMP/share/musicctl/mpv_hooks.lua"
 
 # 12b. Pure-Bash format_mmss and ascii_bar boundary checks
 assert_contains "format_mmss 0 -> 00:00" "$("$BIN" _format_mmss 0)" "00:00"
@@ -399,18 +409,19 @@ export MUSICCTL_PROVIDERS_DIR="$PROV_DIR"
 PROV_RES="$("$BIN" _resolve_provider "download" "cd" "dQw4w9WgXcQ" "Test Title" "Test Artist" "" 10)"
 assert_ok "provider chain skips empty 10-empty and picks 20-mock-flac" jq -e '.provider == "20-mock-flac.sh" and .codec == "flac"' <<<"$PROV_RES" >/dev/null
 
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/*
 DL_CD_OUT="$("$BIN" dl --quality cd "dQw4w9WgXcQ")"
 assert_contains "dl --quality cd uses mock flac provider" "$DL_CD_OUT" "20-mock-flac.sh"
-CD_FLAC_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
+CD_FLAC_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
 assert_ok "dl --quality cd writes .flac file" test -s "$CD_FLAC_OUT"
 FLAC_PROBE="$(ffprobe -v error -show_entries stream=codec_type,codec_name:format_tags=title -of json "$CD_FLAC_OUT")"
 assert_ok "dl --quality cd embeds title tag and cover art" jq -e '((.format.tags.title // .format.tags.TITLE) == "dQw4w9WgXcQ") and ([.streams[].codec_type] | index("video") != null)' <<<"$FLAC_PROBE" >/dev/null
 
 rm -f "$CD_FLAC_OUT"
-DL_SM_OUT="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+DL_SM_OUT="$("$BIN" dl --quality small --format m4a "dQw4w9WgXcQ")"
 assert_contains "dl --quality small transcodes FLAC to AAC" "$DL_SM_OUT" "aac"
-SM_M4A_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].m4a"
-assert_ok "dl --quality small writes .m4a file" test -s "$SM_M4A_OUT"
+SM_M4A_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.m4a"
+assert_ok "dl --quality small --format m4a writes .m4a file" test -s "$SM_M4A_OUT"
 M4A_PROBE="$(ffprobe -v error -show_entries stream=codec_name:format_tags=title -of json "$SM_M4A_OUT")"
 assert_ok "dl --quality small produces valid AAC M4A with title tag" jq -e '(.streams[0].codec_name == "aac") and (.format.tags.title == "dQw4w9WgXcQ")' <<<"$M4A_PROBE" >/dev/null
 BAD_COVER="$TMP_DIR/bad-cover.jpg"
@@ -480,7 +491,7 @@ printf '{"url":"%s","codec":"wav","bit_depth":16,"sample_rate":44100}\n' "$WAV10
 PROV_WAV
 chmod +x "$PROV_DIR/20-mock-flac.sh"
 rm -f "$SM_M4A_OUT"
-DL_WAV_SM="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+DL_WAV_SM="$("$BIN" dl --quality small --format m4a "dQw4w9WgXcQ")"
 assert_contains "dl --quality small transcodes WAV pcm_s16le to AAC" "$DL_WAV_SM" "aac (from pcm_s16le)"
 assert_ok "dl --quality small from WAV writes .m4a file" test -s "$SM_M4A_OUT"
 unset MUSICCTL_PROVIDERS_DIR
@@ -515,16 +526,16 @@ PROV_M3
 chmod +x "$PROV_MULTI"/*.sh
 
 export MUSICCTL_PROVIDERS_DIR="$PROV_MULTI"
-rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
-DL_MULTI_CD="$("$BIN" dl --quality cd "dQw4w9WgXcQ")"
+rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+DL_MULTI_CD="$("$BIN" dl --quality cd --force "dQw4w9WgXcQ")"
 assert_contains "dl --quality cd skips lossy provider and picks 20-cd.sh" "$DL_MULTI_CD" "20-cd.sh"
 
-rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
-DL_MULTI_HR="$("$BIN" dl --quality hires "dQw4w9WgXcQ")"
+rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+DL_MULTI_HR="$("$BIN" dl --quality hires --force "dQw4w9WgXcQ")"
 assert_contains "dl --quality hires skips cd and picks 30-hires.sh" "$DL_MULTI_HR" "30-hires.sh"
 
-rm -f "$PROV_MULTI/30-hires.sh" "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ [dQw4w9WgXcQ].flac"
-DL_CASC_HR="$("$BIN" dl --quality hires "dQw4w9WgXcQ")"
+rm -f "$PROV_MULTI/30-hires.sh" "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+DL_CASC_HR="$("$BIN" dl --quality hires --force "dQw4w9WgXcQ")"
 assert_contains "dl --quality hires cascades to cd provider when hires missing" "$DL_CASC_HR" "20-cd.sh"
 
 PROV_STREAM="$TMP_DIR/providers-stream"
@@ -557,6 +568,331 @@ assert_ok "sleep child process terminated (no orphan)" bash -c '! kill -0 "$1" 2
 
 DOC_SMALL="$(MUSICCTL_QUALITY=small "$BIN" doctor)"
 assert_contains "doctor reflects small quality format" "$DOC_SMALL" "249/250/139"
+
+# 13i. WP2A: Multi-catalog help, config precedence, parse-stdin fixtures, invalid flag rejection, and ytm:song ref play
+HELP_WP2A="$("$BIN" --help)"
+assert_contains "help lists browse command" "$HELP_WP2A" "browse"
+assert_contains "help lists --catalog flag" "$HELP_WP2A" "--catalog"
+assert_contains "help lists --type flag" "$HELP_WP2A" "--type"
+
+cat >"$MUSICCTL_CONFIG" <<'CFG_CAT'
+MUSICCTL_CATALOG=badcfgcat
+CFG_CAT
+CAT_CFG_ERR="$(env -u MUSICCTL_CATALOG MUSICCTL_CONFIG="$MUSICCTL_CONFIG" "$BIN" search "hello" 2>&1 || true)"
+assert_contains "config sets MUSICCTL_CATALOG when env unset" "$CAT_CFG_ERR" "Unknown catalog 'badcfgcat'"
+CAT_ENV_ERR="$(MUSICCTL_CATALOG=badenvcat MUSICCTL_CONFIG="$MUSICCTL_CONFIG" "$BIN" search "hello" 2>&1 || true)"
+assert_contains "env overrides MUSICCTL_CATALOG from config" "$CAT_ENV_ERR" "Unknown catalog 'badenvcat'"
+rm -f "$MUSICCTL_CONFIG"
+
+assert_ok "search rejects invalid --catalog" bash -c '! "$1" search --catalog spotify "hello" >/dev/null 2>&1' _ "$BIN"
+assert_ok "search rejects invalid --type" bash -c '! "$1" search --type podcasts "hello" >/dev/null 2>&1' _ "$BIN"
+
+DZ_FIXTURE='{"data":[{"id":3135556,"title":"HBFS","isrc":"GBDUW0000059","duration":224,"track_position":4,"artist":{"name":"Daft Punk"},"album":{"title":"Discovery","release_date":"2001-03-12","cover_xl":"https://cdn/1000x1000.jpg"}}]}'
+DZ_PARSE="$(printf '%s' "$DZ_FIXTURE" | python3 "$ROOT_DIR/lib/catalog.py" parse-stdin deezer search songs)"
+assert_ok "catalog.py parse-stdin deezer extracts ISRC and album" jq -e '.[0].source == "deezer" and .[0].isrc == "GBDUW0000059" and .[0].album == "Discovery"' <<<"$DZ_PARSE" >/dev/null
+
+IT_FIXTURE='{"results":[{"wrapperType":"track","trackId":1440857781,"trackName":"Get Lucky","artistName":"Daft Punk","collectionName":"RAM","trackNumber":8,"trackTimeMillis":369626,"releaseDate":"2013-05-17T07:00:00Z","artworkUrl100":"https://is1/100x100bb.jpg"}]}'
+IT_PARSE="$(printf '%s' "$IT_FIXTURE" | python3 "$ROOT_DIR/lib/catalog.py" parse-stdin itunes search songs)"
+assert_ok "catalog.py parse-stdin itunes upgrades 1000x1000bb cover" jq -e '.[0].source == "itunes" and (.[0].cover_url | endswith("1000x1000bb.jpg"))' <<<"$IT_PARSE" >/dev/null
+
+export MUSICCTL_PROVIDERS_DIR="$PROV_STREAM"
+assert_ok "play ytm:song ref resolves through mock WAV provider" "$BIN" play "ytm:song:dQw4w9WgXcQ" >/dev/null
+REF_JSON="$("$BIN" status --json)"
+assert_ok "play ytm:song ref loads WAV into isolated mpv" jq -e '.state == "playing" and .codec == "pcm_s16le"' <<<"$REF_JSON" >/dev/null
+"$BIN" stop >/dev/null
+unset MUSICCTL_PROVIDERS_DIR
+
+# 13j. WP2B: Album/ISRC/year/track_num & clean title propagation, provider JSON stdin, and FLAC/M4A tags
+assert_contains "_parse_meta_album extracts album" "$("$BIN" _parse_meta_album "Pamungkas • Walk the Talk • 3:28")" "Walk the Talk"
+assert_ok "_parse_meta_album ignores duration-only meta" test -z "$("$BIN" _parse_meta_album "Pamungkas • 3:28")"
+assert_contains "_clean_title strips Official Video" "$("$BIN" _clean_title "To the Bone (Official Video) [HD]")" "To the Bone"
+assert_contains "_clean_title preserves Acoustic" "$("$BIN" _clean_title "Sailing (Acoustic) [Lyrics]")" "Sailing (Acoustic)"
+
+TAGGED_FLAC="$TMP_DIR/tagged_wp2b.flac"
+ffmpeg -y -v error -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -c:a flac \
+  -metadata "title=To the Bone (Official Video)" \
+  -metadata "artist=Pamungkas" \
+  -metadata "album=Walk the Talk" \
+  -metadata "date=2018" \
+  -metadata "track=4" \
+  -metadata "isrc=ID1234567890" \
+  "$TAGGED_FLAC"
+
+CAP_PROV="$TMP_DIR/providers-wp2b"
+CAP_JSON="$TMP_DIR/provider-stdin.json"
+mkdir -p "$CAP_PROV"
+cat >"$CAP_PROV/10-cap.sh" <<CAP_EOF
+#!/usr/bin/env bash
+cat >"$CAP_JSON"
+printf '{"url":"%s","codec":"flac","bit_depth":16,"sample_rate":44100}\n' "$TAGGED_FLAC"
+CAP_EOF
+chmod +x "$CAP_PROV/10-cap.sh"
+
+assert_ok "play tagged flac in isolated mpv" "$BIN" play "$TAGGED_FLAC" >/dev/null
+"$BIN" toggle >/dev/null
+WP2B_STAT="$("$BIN" status --json)"
+assert_ok "status --json exposes artist, album, year, track_num, isrc" jq -e '.artist == "Pamungkas" and .album == "Walk the Talk" and .year == 2018 and .track_num == 4 and .isrc == "ID1234567890"' <<<"$WP2B_STAT" >/dev/null
+
+export MUSICCTL_PROVIDERS_DIR="$CAP_PROV"
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/*
+DL_WP2B_CD="$("$BIN" dl --quality cd current)"
+assert_contains "dl current cd uses capturing provider" "$DL_WP2B_CD" "10-cap.sh"
+assert_ok "provider stdin receives album, isrc, track_num, year, and clean title" jq -e '.album == "Walk the Talk" and .isrc == "ID1234567890" and .track_num == 4 and .year == 2018 and .title == "To the Bone"' "$CAP_JSON" >/dev/null
+
+OUT_WP2B_FLAC="$MUSICCTL_DOWNLOAD_DIR/Pamungkas/Walk the Talk/04 - To the Bone.flac"
+assert_ok "dl current cd writes .flac file" test -s "$OUT_WP2B_FLAC"
+FLAC_TAGS="$(ffprobe -v error -show_entries format_tags=title,artist,album,date,track,tracknumber,isrc -of json "$OUT_WP2B_FLAC")"
+assert_ok "ffprobe confirms album/date/isrc written to .flac" jq -e '((.format.tags.album // .format.tags.ALBUM) == "Walk the Talk") and ((.format.tags.date // .format.tags.DATE) == "2018") and ((.format.tags.isrc // .format.tags.ISRC) == "ID1234567890")' <<<"$FLAC_TAGS" >/dev/null
+
+DL_WP2B_SM="$("$BIN" dl --quality small --format m4a current)"
+assert_contains "dl current small transcodes to AAC" "$DL_WP2B_SM" "aac"
+OUT_WP2B_M4A="$MUSICCTL_DOWNLOAD_DIR/Pamungkas/Walk the Talk/04 - To the Bone.m4a"
+assert_ok "dl current small writes .m4a file" test -s "$OUT_WP2B_M4A"
+M4A_TAGS="$(ffprobe -v error -show_entries format_tags=title,artist,album,date,track -of json "$OUT_WP2B_M4A")"
+assert_ok "ffprobe confirms album and date written to .m4a" jq -e '(.format.tags.album == "Walk the Talk") and (.format.tags.date == "2018")' <<<"$M4A_TAGS" >/dev/null
+unset MUSICCTL_PROVIDERS_DIR
+"$BIN" stop >/dev/null
+
+# 13k. WP2C: Audiophile 774/251/141 format, cookies, soxr/ReplayGain, Hi-Res AF guard, SponsorBlock, and Autoplay
+assert_contains "_ytm_format cd prioritizes 774/251/141" "$("$BIN" _ytm_format cd)" "774/251/141/bestaudio[acodec=opus]/bestaudio/best"
+assert_contains "_ytm_format small uses <=96k" "$("$BIN" _ytm_format small)" "249/250/139"
+
+AF_BASS_OFF="$("$BIN" _build_af_chain bass 0)"
+assert_ok "norm=off preserves native sample rate (no aresample=48000)" bash -c '! grep -qF "aresample=48000" <<<"$1"' _ "$AF_BASS_OFF"
+AF_NORM_ON="$("$BIN" _build_af_chain flat 1)"
+assert_contains "norm=on includes loudnorm" "$AF_NORM_ON" "loudnorm="
+
+ARGS_ALBUM="$(MUSICCTL_REPLAYGAIN=album "$BIN" _mpv_audiophile_args)"
+assert_contains "replaygain album arg emitted" "$ARGS_ALBUM" "--replaygain=album"
+assert_contains "soxr resampler arg emitted" "$ARGS_ALBUM" "resampler=soxr"
+assert_contains "default ytdl-raw-options preserves ignore-config" "$ARGS_ALBUM" "ignore-config="
+
+COOKIE_FILE="$TMP_DIR/cookies.txt"
+printf '# Netscape HTTP Cookie File\n' >"$COOKIE_FILE"
+ARGS_CK_FILE="$(MUSICCTL_YTM_COOKIES="$COOKIE_FILE" "$BIN" _mpv_audiophile_args)"
+assert_contains "cookies file passed to ytdl-raw-options" "$ARGS_CK_FILE" "cookies=$COOKIE_FILE"
+ARGS_CK_BR="$(MUSICCTL_YTM_COOKIES=firefox "$BIN" _mpv_audiophile_args)"
+assert_contains "browser name passed as cookies-from-browser" "$ARGS_CK_BR" "cookies-from-browser=firefox"
+
+SB_PARSED="$(printf '%s' '[{"segment":[10.0,22.0],"category":"music_offtopic"},{"segment":[30.0,30.2],"category":"music_offtopic"}]' | "$BIN" _parse_sponsorblock)"
+assert_ok "offline SponsorBlock parser keeps >=0.5s music_offtopic" jq -e 'length == 1 and .[0].start == 10.0 and .[0].end == 22.0' <<<"$SB_PARSED" >/dev/null
+
+AUTO_ON="$("$BIN" autoplay on)"
+assert_contains "autoplay on succeeds" "$AUTO_ON" "Infinite autoplay: on"
+assert_contains "autoplay status shows on" "$("$BIN" autoplay status)" "Infinite autoplay: on"
+AUTO_STAT_JSON="$("$BIN" status --json)"
+assert_ok "status --json includes autoplay true" jq -e '.autoplay == true and .sponsorblock == false' <<<"$AUTO_STAT_JSON" >/dev/null
+AUTO_TGL="$("$BIN" autoplay toggle)"
+assert_contains "autoplay toggle switches off" "$AUTO_TGL" "Infinite autoplay: off"
+assert_ok "_autoplay_seed no-ops cleanly when autoplay=off" "$BIN" _autoplay_seed "IR7tYHdYN2Q"
+
+# 13l. WP2D: Production Download Engine & Lazy Provider SSOT
+PROV_DL="$TMP_DIR/providers-dl"
+mkdir -p "$PROV_DL"
+DL_SRC_FLAC="$TMP_DIR/dl_src.flac"
+ffmpeg -y -v error -f lavfi -i "sine=frequency=523:duration=1" -ar 44100 -sample_fmt s16 -c:a flac "$DL_SRC_FLAC"
+cat >"$PROV_DL/10-dl.sh" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"provider":"10-dl.sh","url":"file://%s","codec":"flac","sample_rate":44100,"bit_depth":16}\n' "$DL_SRC_FLAC"
+EOF
+chmod +x "$PROV_DL/10-dl.sh"
+
+export MUSICCTL_PROVIDERS_DIR="$PROV_DL"
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/* "$MUSICCTL_DATA_DIR/download-archive.tsv"
+
+DL_OPUS="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+assert_contains "dl --quality small defaults to opus" "$DL_OPUS" "opus"
+assert_ok "dl --quality small writes .opus file" test -s "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.opus"
+OPUS_CODEC="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.opus")"
+assert_ok "small default .opus uses opus codec" test "$OPUS_CODEC" = "opus"
+
+DL_MP3="$("$BIN" dl --quality small --format mp3 --replaygain "dQw4w9WgXcQ")"
+assert_contains "dl --format mp3 writes mp3" "$DL_MP3" "mp3"
+assert_ok "dl --format mp3 writes .mp3 file" test -s "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.mp3"
+MP3_PROBE="$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name:format_tags -of json "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.mp3")"
+assert_ok "dl --format mp3 --replaygain embeds REPLAYGAIN_TRACK_GAIN" jq -e '(.streams[0].codec_name == "mp3") and ((.format.tags | to_entries | map(.key | ascii_downcase)) | index("replaygain_track_gain") != null)' <<<"$MP3_PROBE" >/dev/null
+
+DL_SKIP="$("$BIN" dl --quality small "dQw4w9WgXcQ")"
+assert_contains "repeat dl skips via download-archive.tsv" "$DL_SKIP" "[SKIP]"
+DL_FORCE="$("$BIN" dl --quality small --force "dQw4w9WgXcQ")"
+assert_contains "dl --force re-downloads despite archive" "$DL_FORCE" "[OK] Downloaded"
+
+DL_TPL_OUT="$("$BIN" dl --quality cd --template "custom/{title}" "dQw4w9WgXcQ")"
+assert_contains "dl --template writes custom subpath" "$DL_TPL_OUT" "custom/dQw4w9WgXcQ.flac"
+assert_ok "dl --template file exists on disk" test -s "$MUSICCTL_DOWNLOAD_DIR/custom/dQw4w9WgXcQ.flac"
+
+rm -f "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+DL_DRY="$("$BIN" dl --quality cd --dry-run --force "dQw4w9WgXcQ")"
+assert_contains "dl --dry-run reports planned path" "$DL_DRY" "[DRY-RUN]"
+assert_ok "dl --dry-run does not create audio file" test ! -e "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+
+# Test sync pl:<name> --prune --jobs 2
+mkdir -p "$MUSICCTL_DATA_DIR/playlists"
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/* "$MUSICCTL_DATA_DIR/download-archive.tsv"
+printf 'trkA1111111\tSong Alpha\tArtist A • Album A • 0:01\ntrkB2222222\tSong Beta\tArtist B • Album B • 0:01\n' >"$MUSICCTL_DATA_DIR/playlists/wpsync.tsv"
+printf 'stale audio\n' >"$MUSICCTL_DOWNLOAD_DIR/stale_track.flac"
+SYNC_OUT="$("$BIN" dl --quality cd --jobs 2 sync pl:wpsync --prune)"
+assert_contains "dl sync prints summary with pruned count" "$SYNC_OUT" "1 pruned"
+assert_ok "dl sync removes stale audio on --prune" test ! -e "$MUSICCTL_DOWNLOAD_DIR/stale_track.flac"
+assert_ok "dl sync fetches track 1 with default template" test -s "$MUSICCTL_DOWNLOAD_DIR/Artist A/Album A/Song Alpha.flac"
+assert_ok "dl sync fetches track 2 with default template" test -s "$MUSICCTL_DOWNLOAD_DIR/Artist B/Album B/Song Beta.flac"
+unset MUSICCTL_PROVIDERS_DIR
+
+# 13m. WP2E: Local Library Indexer & Artist/Album Grouping
+WP2E_LIB="$TMP_DIR/wp2e-lib"
+WP2E_CACHE="$TMP_DIR/wp2e-cache"
+mkdir -p "$WP2E_LIB" "$WP2E_CACHE"
+ffmpeg -y -v error -f lavfi -i "sine=frequency=440:duration=1" -c:a flac \
+  -metadata "artist=Pamungkas" -metadata "album=Walk the Talk" -metadata "title=To the Bone" -metadata "track=4" -metadata "date=2018" \
+  "$WP2E_LIB/to_the_bone.flac"
+ffmpeg -y -v error -f lavfi -i "sine=frequency=494:duration=1" -c:a flac \
+  -metadata "artist=Pamungkas" -metadata "album=Walk the Talk" -metadata "title=Kenangan Manis" -metadata "track=2" -metadata "date=2018" \
+  "$WP2E_LIB/kenangan_manis.flac"
+ffmpeg -y -v error -f lavfi -i "sine=frequency=523:duration=1" -c:a aac \
+  -metadata "artist=NIKI" -metadata "album=Nicole" -metadata "title=High School in Jakarta" -metadata "track=2" -metadata "date=2022" \
+  "$WP2E_LIB/jakarta.m4a"
+
+LIB_ARTIST_OUT="$(MUSICCTL_DOWNLOAD_DIR="$WP2E_LIB" MUSICCTL_CACHE_DIR="$WP2E_CACHE" "$BIN" local --by artist)"
+assert_contains "local --by artist groups Pamungkas" "$LIB_ARTIST_OUT" "Pamungkas (2 tracks)"
+assert_contains "local --by artist groups NIKI" "$LIB_ARTIST_OUT" "NIKI (1 tracks)"
+assert_ok "local writes incremental library.json index" test -s "$WP2E_CACHE/library.json"
+
+LIB_ALBUM_OUT="$(MUSICCTL_DOWNLOAD_DIR="$WP2E_LIB" MUSICCTL_CACHE_DIR="$WP2E_CACHE" "$BIN" local --by album)"
+assert_contains "local --by album groups Walk the Talk" "$LIB_ALBUM_OUT" "Walk the Talk - Pamungkas (2 tracks)"
+assert_contains "local --by album groups Nicole" "$LIB_ALBUM_OUT" "Nicole - NIKI (1 tracks)"
+
+LIB_SEARCH_OUT="$(MUSICCTL_DOWNLOAD_DIR="$WP2E_LIB" MUSICCTL_CACHE_DIR="$WP2E_CACHE" "$BIN" local "jakarta")"
+assert_contains "local query matches Jakarta" "$LIB_SEARCH_OUT" "High School in Jakarta"
+assert_ok "local query excludes non-matching track" bash -c '! grep -qF "To the Bone" <<<"$1"' _ "$LIB_SEARCH_OUT"
+
+LIB_JSON_OUT="$(MUSICCTL_DOWNLOAD_DIR="$WP2E_LIB" MUSICCTL_CACHE_DIR="$WP2E_CACHE" "$BIN" local --by flat --json)"
+assert_ok "local --json outputs 3 indexed entries" jq -e 'length == 3 and ([.[].artist] | index("Pamungkas") != null)' <<<"$LIB_JSON_OUT" >/dev/null
+assert_ok "local --rescan succeeds" env MUSICCTL_DOWNLOAD_DIR="$WP2E_LIB" MUSICCTL_CACHE_DIR="$WP2E_CACHE" "$BIN" local --rescan --by artist >/dev/null
+
+# 13n. WP2F: DASH FLAC Manifest, OpenSubsonic Adapter & UNIX Lifecycle Hooks
+DASH_DIR="$TMP_DIR/dash-src"
+PROV_V2="$TMP_DIR/providers-v2"
+HOOKS_V2="$TMP_DIR/hooks-v2"
+mkdir -p "$DASH_DIR" "$PROV_V2" "$HOOKS_V2/on-download-complete.d" "$HOOKS_V2/on-track-change.d"
+ffmpeg -y -v error -f lavfi -i "sine=frequency=440:duration=1" -ar 44100 -sample_fmt s16 -c:a flac -f dash "$DASH_DIR/manifest.mpd"
+
+cat >"$PROV_V2/10-dash.sh" <<EOF
+#!/usr/bin/env bash
+cat >"$TMP_DIR/prov_v2_req.json"
+printf '{"provider":"10-dash.sh","manifest":"file://%s/manifest.mpd","codec":"flac","sample_rate":44100,"bit_depth":16}\n' "$DASH_DIR"
+EOF
+chmod +x "$PROV_V2/10-dash.sh"
+
+HOOK_DL_JSON="$TMP_DIR/hook_dl_payload.json"
+cat >"$HOOKS_V2/on-download-complete.d/10-capture.sh" <<EOF
+#!/usr/bin/env bash
+cat >"$HOOK_DL_JSON"
+EOF
+cat >"$HOOKS_V2/on-download-complete.d/20-failing.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 1
+EOF
+chmod +x "$HOOKS_V2/on-download-complete.d/10-capture.sh" "$HOOKS_V2/on-download-complete.d/20-failing.sh"
+
+HOOK_TRK_JSON="$TMP_DIR/hook_trk_payload.json"
+cat >"$HOOKS_V2/on-track-change.d/10-track.sh" <<EOF
+#!/usr/bin/env bash
+cat >"$HOOK_TRK_JSON"
+EOF
+chmod +x "$HOOKS_V2/on-track-change.d/10-track.sh"
+
+rm -rf "${MUSICCTL_DOWNLOAD_DIR:?}"/* "$MUSICCTL_DATA_DIR/download-archive.tsv"
+DL_DASH_OUT="$(MUSICCTL_PROVIDERS_DIR="$PROV_V2" MUSICCTL_HOOKS_DIR="$HOOKS_V2" "$BIN" dl --quality cd --force "dQw4w9WgXcQ")"
+assert_contains "dl remuxes DASH MPD provider to FLAC" "$DL_DASH_OUT" "10-dash.sh"
+assert_ok "DASH remuxed .flac exists on disk" test -s "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac"
+assert_ok "provider v2 stdin contains source and format" jq -e '.source == "ytm" and .format == "auto"' "$TMP_DIR/prov_v2_req.json" >/dev/null
+assert_ok "DASH FLAC ffprobe verifies flac codec and duration" jq -e '(.streams[0].codec_name == "flac") and ((.format.duration | tonumber) > 0)' <<<"$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name:format=duration -of json "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac")" >/dev/null
+assert_ok "on-download-complete hook received JSON despite 20-failing.sh exit 1" jq -e '.event == "on-download-complete" and .codec == "flac" and (.path | length > 0)' "$HOOK_DL_JSON" >/dev/null
+
+# Verify OpenSubsonic provider script against local mock HTTP server
+SUB_PORT_FILE="$TMP_DIR/subsonic.port"
+python3 - "$SUB_PORT_FILE" "$TMP_DIR/subsonic.pid" <<'PY'
+import http.server, json, os, sys
+port_file, pid_file = sys.argv[1], sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({
+            "subsonic-response": {
+                "status": "ok",
+                "searchResult3": {
+                    "song": [{
+                        "id": "sub-99",
+                        "title": "To the Bone",
+                        "artist": "Pamungkas",
+                        "suffix": "flac",
+                        "samplingRate": 48000,
+                        "bitDepth": 24,
+                    }]
+                },
+            }
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+pid = os.fork()
+if pid == 0:
+    srv.serve_forever()
+else:
+    with open(port_file, "w") as f:
+        f.write(str(srv.server_address[1]))
+    with open(pid_file, "w") as f:
+        f.write(str(pid))
+PY
+SUB_PORT="$(cat "$SUB_PORT_FILE")"
+SUB_PID="$(cat "$TMP_DIR/subsonic.pid")"
+SUB_OUT="$(printf '{"id":"t1","title":"To the Bone","artist":"Pamungkas","quality":"hires"}\n' | MUSICCTL_SUBSONIC_URL="http://127.0.0.1:$SUB_PORT" MUSICCTL_SUBSONIC_USER="alice" MUSICCTL_SUBSONIC_PASS="secret" "$ROOT_DIR/examples/providers/20-opensubsonic.sh")"
+kill "$SUB_PID" 2>/dev/null || true
+assert_ok "20-opensubsonic.sh returns valid lossless stream JSON" jq -e '.provider == "opensubsonic" and .codec == "flac" and .bit_depth == 24 and (.url | contains("rest/stream.view")) and (.url | contains("id=sub-99"))' <<<"$SUB_OUT" >/dev/null
+
+# Verify on-track-change hook fires via mpv_hooks.lua during playback
+"$BIN" stop >/dev/null 2>&1 || true
+MUSICCTL_HOOKS_DIR="$HOOKS_V2" "$BIN" play "$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.flac" >/dev/null
+for _ in $(seq 1 20); do
+  [[ -s "$HOOK_TRK_JSON" ]] && break
+  sleep 0.1
+done
+assert_ok "on-track-change hook fires from isolated mpv" jq -e '.event == "on-track-change" and (.path | contains("dQw4w9WgXcQ.flac"))' "$HOOK_TRK_JSON" >/dev/null
+"$BIN" stop >/dev/null
+
+# 13o. WP2G: JSONL Download Progress & Job Registry
+JSONL_OUT="$(MUSICCTL_PROVIDERS_DIR="$PROV_DL" "$BIN" dl --quality small --jsonl --force "dQw4w9WgXcQ")"
+JSONL_LAST="$(tail -n 1 <<<"$JSONL_OUT")"
+assert_ok "dl --jsonl emits valid done JSONL event" jq -e '(.job_id | length > 0) and .status == "done" and .pct == 100' <<<"$JSONL_LAST" >/dev/null
+DL_STAT_JSON="$("$BIN" dl status --json)"
+assert_ok "dl status --json returns recorded jobs array" jq -e 'type == "array" and length >= 1' <<<"$DL_STAT_JSON" >/dev/null
+
+# Gap closures: pl:<name> play/add & resolve-stream source forwarding
+"$BIN" pl create gappl >/dev/null
+printf '%s\tGap Song 1\tArtist G\n%s\tGap Song 2\tArtist G\n' "$WAV_FILE" "$WAV_FILE" >"$MUSICCTL_DATA_DIR/playlists/gappl.tsv"
+"$BIN" play "pl:gappl" >/dev/null
+"$BIN" add "pl:gappl" >/dev/null
+Q_GAPPL="$("$BIN" queue | sed -E $'s/\x1b\\[[0-9;]*m//g')"
+assert_contains "play+add pl:gappl queues 4 items" "$Q_GAPPL" "4. "
+"$BIN" stop >/dev/null
+
+PROV_STRM_DIR="$TMP_DIR/prov-stream-src"
+mkdir -p "$PROV_STRM_DIR"
+STRM_REQ="$TMP_DIR/stream_src_req.json"
+cat >"$PROV_STRM_DIR/10-stream.sh" <<EOF
+#!/usr/bin/env bash
+cat >"$STRM_REQ"
+printf '{"provider":"10-stream.sh","url":"file://%s","codec":"wav"}\n' "$WAV_FILE"
+EOF
+chmod +x "$PROV_STRM_DIR/10-stream.sh"
+MUSICCTL_PROVIDERS_DIR="$PROV_STRM_DIR" python3 "$ROOT_DIR/lib/providers.py" resolve-stream cd trk9 "Title" "Artist" "Album" 10 US123 1 2024 deezer >/dev/null
+assert_ok "resolve-stream forwards trailing source=deezer" jq -e '.source == "deezer"' "$STRM_REQ" >/dev/null
 
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
 if [[ "$OFFLINE" != "1" ]]; then
