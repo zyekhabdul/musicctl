@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -18,7 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
@@ -131,12 +133,30 @@ def load_archive(archive_path: Path) -> dict[tuple[str, str, str], str]:
     return entries
 
 
+@contextlib.contextmanager
+def _file_lock(target_path: Path, thread_lock: threading.Lock | None = None) -> Iterator[None]:
+    """Serialize in-process threads and cross-process writers via persistent sibling flock."""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.with_name(f".{target_path.name}.lock")
+    if thread_lock is not None:
+        thread_lock.acquire()
+    try:
+        with open(lock_path, "a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        if thread_lock is not None:
+            thread_lock.release()
+
+
 def record_archive(archive_path: Path, lock: threading.Lock, tkey: str, quality: str, fmt: str, dest: Path) -> None:
-    """Thread-safe atomic upsert into download-archive.tsv."""
+    """Thread-safe and process-safe atomic upsert into download-archive.tsv."""
     if not tkey:
         return
-    with lock:
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with _file_lock(archive_path, lock):
         existing: list[str] = []
         if archive_path.is_file():
             for ln in archive_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -147,7 +167,7 @@ def record_archive(archive_path: Path, lock: threading.Lock, tkey: str, quality:
                     existing.append(ln)
         dest_clean = str(dest).replace("\t", " ").replace("\n", " ")
         existing.append(f"{tkey}\t{quality}\t{fmt}\t{dest_clean}\t{int(time.time())}")
-        tmp = archive_path.with_name(f".{archive_path.name}.{threading.get_ident()}.tmp")
+        tmp = archive_path.with_name(f".{archive_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text("\n".join(existing) + "\n", encoding="utf-8")
         tmp.replace(archive_path)
 
@@ -659,10 +679,9 @@ def load_sync_state(data_dir: Path) -> dict[str, list[str]]:
 
 
 def save_sync_state(data_dir: Path, lock: threading.Lock, state: dict[str, list[str]]) -> None:
-    """Persist per-source sync ownership manifest atomically."""
-    with lock:
-        sf = _sync_state_file(data_dir)
-        sf.parent.mkdir(parents=True, exist_ok=True)
+    """Persist per-source sync ownership manifest atomically with cross-process lock."""
+    sf = _sync_state_file(data_dir)
+    with _file_lock(sf, lock):
         fd, tmp_name = tempfile.mkstemp(prefix=".sync-state.", suffix=".tmp", dir=str(sf.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -684,19 +703,23 @@ def _load_jobs(data_dir: Path) -> list[dict[str, Any]]:
         return []
 
 
+def _save_jobs_unlocked(jf: Path, jobs: list[dict[str, Any]]) -> None:
+    jf.parent.mkdir(parents=True, exist_ok=True)
+    trimmed = jobs[-20:]
+    fd, tmp_name = tempfile.mkstemp(prefix=".dl-jobs.", suffix=".tmp", dir=str(jf.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(trimmed, fh, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp_name, jf)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
 def _save_jobs(data_dir: Path, lock: threading.Lock, jobs: list[dict[str, Any]]) -> None:
-    with lock:
-        jf = _jobs_file(data_dir)
-        jf.parent.mkdir(parents=True, exist_ok=True)
-        trimmed = jobs[-20:]
-        fd, tmp_name = tempfile.mkstemp(prefix=".dl-jobs.", suffix=".tmp", dir=str(jf.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(trimmed, fh, ensure_ascii=False, separators=(",", ":"))
-            os.replace(tmp_name, jf)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+    jf = _jobs_file(data_dir)
+    with _file_lock(jf, lock):
+        _save_jobs_unlocked(jf, jobs)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -712,21 +735,24 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _upsert_job(data_dir: Path, lock: threading.Lock, entry: dict[str, Any]) -> None:
-    jobs = [j for j in _load_jobs(data_dir) if j.get("job_id") != entry.get("job_id")]
-    jobs.append(entry)
-    _save_jobs(data_dir, lock, jobs)
+    jf = _jobs_file(data_dir)
+    with _file_lock(jf, lock):
+        jobs = [j for j in _load_jobs(data_dir) if j.get("job_id") != entry.get("job_id")]
+        jobs.append(entry)
+        _save_jobs_unlocked(jf, jobs)
 
 
 def _cmd_dl_status(data_dir: Path, as_json: bool = False) -> int:
-    jobs = _load_jobs(data_dir)
-    lock = threading.Lock()
-    dirty = False
-    for j in jobs:
-        if j.get("status") == "running" and not _pid_alive(int(j.get("pid") or 0)):
-            j["status"] = "stale"
-            dirty = True
-    if dirty:
-        _save_jobs(data_dir, lock, jobs)
+    jf = _jobs_file(data_dir)
+    with _file_lock(jf):
+        jobs = _load_jobs(data_dir)
+        dirty = False
+        for j in jobs:
+            if j.get("status") == "running" and not _pid_alive(int(j.get("pid") or 0)):
+                j["status"] = "stale"
+                dirty = True
+        if dirty:
+            _save_jobs_unlocked(jf, jobs)
     if as_json:
         print(json.dumps(jobs, ensure_ascii=False))
         return 0
@@ -739,25 +765,26 @@ def _cmd_dl_status(data_dir: Path, as_json: bool = False) -> int:
 
 
 def _cmd_dl_cancel(data_dir: Path, target_id: str = "all") -> int:
-    jobs = _load_jobs(data_dir)
-    lock = threading.Lock()
+    jf = _jobs_file(data_dir)
     cancelled = 0
-    for j in jobs:
-        if j.get("status") != "running":
-            continue
-        jid = str(j.get("job_id") or "")
-        if target_id not in ("", "all") and jid != target_id:
-            continue
-        pid = int(j.get("pid") or 0)
-        if _pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGTERM)
-                cancelled += 1
-            except OSError:
-                pass
-        j["status"] = "cancelled"
-        j["updated_at"] = int(time.time())
-    _save_jobs(data_dir, lock, jobs)
+    with _file_lock(jf):
+        jobs = _load_jobs(data_dir)
+        for j in jobs:
+            if j.get("status") != "running":
+                continue
+            jid = str(j.get("job_id") or "")
+            if target_id not in ("", "all") and jid != target_id:
+                continue
+            pid = int(j.get("pid") or 0)
+            if _pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    cancelled += 1
+                except OSError:
+                    pass
+            j["status"] = "cancelled"
+            j["updated_at"] = int(time.time())
+        _save_jobs_unlocked(jf, jobs)
     print(f"[OK] Cancelled {cancelled} download job(s)")
     return 0
 

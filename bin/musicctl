@@ -660,20 +660,6 @@ play_catalog_track() {
   fi
 }
 
-has_providers() {
-  [[ -d "$MUSICCTL_PROVIDERS_DIR" ]] || return 1
-  local p
-  shopt -s nullglob
-  for p in "$MUSICCTL_PROVIDERS_DIR"/*; do
-    if [[ ! -d "$p" && -x "$p" ]]; then
-      shopt -u nullglob
-      return 0
-    fi
-  done
-  shopt -u nullglob
-  return 1
-}
-
 play_catalog_ref() {
   local action="$1" ref="$2"
   local ref_json src etype eid
@@ -708,68 +694,26 @@ play_catalog_ref() {
     return 0
   fi
 
-  local use_prov=0
-  has_providers && use_prov=1
+  local batch_jsonl=""
+  batch_jsonl="$(printf '%s' "$bjson" | run_providers_py resolve-batch "$(quality_state_get)" "$CACHE_AUDIO_DIR" 2>/dev/null || true)"
+  [[ -n "$batch_jsonl" ]] || die "No playable tracks found in $ref"
 
-  local count=0 batch_jsonl="" hist_rows="" first_title="" first_meta=""
-  local t_src t_eid t_title t_artist t_album t_isrc t_track_num t_year t_dur
-  while IFS=$'\x1f' read -r t_src t_eid t_title t_artist t_album t_isrc t_track_num t_year t_dur; do
-    [[ -n "$t_eid" ]] || continue
-    local dur_lbl="" meta="" target="" hdrs_json="{}" hid=""
-    ((t_dur > 0)) 2>/dev/null && dur_lbl="$(format_mmss "$t_dur")"
-    [[ -n "$t_artist" ]] && meta="$t_artist"
-    [[ -n "$t_album" ]] && meta="${meta:+$meta • }$t_album"
-    [[ -n "$dur_lbl" ]] && meta="${meta:+$meta • }$dur_lbl"
-    [[ -n "$meta" ]] || meta="$t_src"
-
-    if [[ "$t_src" == "ytm" ]]; then
-      hid="$t_eid"
-      if target="$(find_cached_audio "$t_eid" 2>/dev/null)"; then
-        :
-      elif ((use_prov == 1)); then
-        local prov_json=""
-        if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$t_eid" "$t_title" "$t_artist" "$t_album" "$t_dur" "$t_isrc" "$t_track_num" "$t_year" "$t_src" 2>/dev/null)"; then
-          target="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
-          hdrs_json="$(jq -c '.headers // {}' <<<"$prov_json" 2>/dev/null || echo "{}")"
-        fi
-      fi
-      [[ -n "$target" ]] || target="$(id_to_url "$t_eid")"
-    else
-      if ((use_prov == 1)); then
-        local prov_json=""
-        if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$t_eid" "$t_title" "$t_artist" "$t_album" "$t_dur" "$t_isrc" "$t_track_num" "$t_year" "$t_src" 2>/dev/null)"; then
-          target="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
-          hdrs_json="$(jq -c '.headers // {}' <<<"$prov_json" 2>/dev/null || echo "{}")"
-          [[ -n "$target" ]] && hid="${t_src}:song:${t_eid}"
-        fi
-      fi
-      if [[ -z "$target" ]]; then
-        local q match yid _yt _ym
-        q="${t_artist:+$t_artist }$t_title"
-        match="$(ytm_search "$q" | head -n 1 || true)"
-        [[ -n "$match" ]] || continue
-        IFS=$'\t' read -r yid _yt _ym <<<"$match"
-        [[ -n "$yid" ]] || continue
-        hid="$yid"
-        target="$(resolve_play_target "$yid")"
-      fi
-    fi
-
-    [[ -n "$target" ]] || continue
-    batch_jsonl+="$(jq -cn --arg u "$target" --arg t "$t_title" --argjson h "${hdrs_json:-{}}" '{url:$u,title:$t,headers:$h}')"$'\n'
-    hist_rows+="${hid}"$'\x1f'"${t_title}"$'\x1f'"${meta}"$'\n'
+  local count=0 hist_rows="" first_title="" first_meta=""
+  hist_rows="$(jq -r '[.hid, .title, .meta] | map(tostring) | join("\u001f")' <<<"$batch_jsonl")"
+  local h_id h_t h_m
+  while IFS=$'\x1f' read -r h_id h_t h_m; do
+    [[ -n "$h_id" ]] || continue
     if ((count == 0)); then
-      first_title="$t_title"
-      first_meta="$meta"
+      first_title="$h_t"
+      first_meta="$h_m"
     fi
     ((count++))
-  done < <(jq -r '.items[] | select(.type == "song") | [.source, .id, (.title // ""), (.artist // ""), (.album // ""), (.isrc // ""), (.track_num // 0), (.year // 0), (.duration // 0)] | map(tostring) | join("\u001f")' <<<"$bjson")
+  done <<<"$hist_rows"
 
   ((count > 0)) || die "No playable tracks found in $ref"
   ensure_daemon
-  printf '%s' "$batch_jsonl" | run_common_py mpv-load-batch "$MUSICCTL_SOCKET" "$action" >/dev/null || die "Failed to load tracks from $ref"
+  printf '%s\n' "$batch_jsonl" | run_common_py mpv-load-batch "$MUSICCTL_SOCKET" "$action" >/dev/null || die "Failed to load tracks from $ref"
 
-  local h_id h_t h_m
   while IFS=$'\x1f' read -r h_id h_t h_m; do
     [[ -n "$h_id" ]] || continue
     record_history "$h_id" "$h_t" "$h_m"

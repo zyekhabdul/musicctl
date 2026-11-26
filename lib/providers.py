@@ -13,16 +13,17 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from common import USER_AGENT, normalize_track_title
+from common import USER_AGENT, VIDEO_ID_RE, format_mmss, normalize_track_title
 
 LOSSLESS_CODECS = ("flac", "alac", "wav")
 URL_SCHEME_RE = re.compile(r"^(https?://|file://|/)")
+CACHE_AUDIO_EXTS = ("flac", "opus", "m4a", "webm", "mp3")
 
 
 def is_lossless_codec(codec: str) -> bool:
@@ -475,6 +476,175 @@ def fetch_validated_download(
     return fallback
 
 
+def find_cached_audio(track_id: str, cache_audio_dir: Path | str | None) -> str:
+    """Return non-empty cached audio file path for a YouTube video ID, or empty string."""
+    if not cache_audio_dir or not VIDEO_ID_RE.match(track_id or ""):
+        return ""
+    cdir = Path(cache_audio_dir)
+    if not cdir.is_dir():
+        return ""
+    for ext in CACHE_AUDIO_EXTS:
+        p = cdir / f"{track_id}.{ext}"
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return str(p)
+        except OSError:
+            continue
+    return ""
+
+
+def _id_to_url(id_or_url: str) -> str:
+    if URL_SCHEME_RE.match(id_or_url or ""):
+        return id_or_url
+    return f"https://www.youtube.com/watch?v={id_or_url}"
+
+
+def _format_track_meta(artist: str, album: str, duration: int, source: str) -> str:
+    parts: list[str] = []
+    if artist:
+        parts.append(artist)
+    if album:
+        parts.append(album)
+    if duration > 0:
+        parts.append(format_mmss(duration))
+    return " • ".join(parts) if parts else source
+
+
+def _default_ytm_fallback_id(query: str) -> str:
+    q = (query or "").strip()
+    if not q:
+        return ""
+    try:
+        import catalog
+
+        found = catalog.search_ytm(q, "songs", limit=1)
+        if found and found[0].get("id"):
+            return str(found[0]["id"])
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(
+            [
+                "yt-dlp",
+                "--ignore-config",
+                "--flat-playlist",
+                "--no-update",
+                "--print",
+                "%(id)s",
+                f"ytsearch1:{q}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15.0,
+        )
+        for ln in (proc.stdout or "").splitlines():
+            vid = ln.strip()
+            if vid:
+                return vid
+    except Exception:
+        pass
+    return ""
+
+
+def resolve_catalog_batch(
+    items: list[dict[str, Any]],
+    quality: str,
+    providers_dir: Path | str,
+    cache_audio_dir: Path | str | None = None,
+    ytm_fallback_fn: Callable[[str], str] | None = None,
+) -> list[dict[str, Any]]:
+    """Resolve browsed catalog song entities into mpv batch items in one Python pass."""
+    use_prov = bool(discover_providers(providers_dir))
+    search_fn = ytm_fallback_fn or _default_ytm_fallback_id
+    resolved: list[dict[str, Any]] = []
+
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "song":
+            continue
+        t_eid = str(item.get("id") or "").strip()
+        if not t_eid:
+            continue
+        t_src = str(item.get("source") or "ytm").strip() or "ytm"
+        t_title = str(item.get("title") or "").strip()
+        t_artist = str(item.get("artist") or "").strip()
+        t_album = str(item.get("album") or "").strip()
+        t_isrc = str(item.get("isrc") or "").strip()
+        t_track_num = max(0, _safe_int(item.get("track_num"), 0))
+        t_year = max(0, _safe_int(item.get("year"), 0))
+        t_dur = max(0, _safe_int(item.get("duration"), 0))
+        meta = _format_track_meta(t_artist, t_album, t_dur, t_src)
+
+        target = ""
+        headers: dict[str, Any] = {}
+        hid = ""
+
+        if t_src == "ytm":
+            hid = t_eid
+            target = find_cached_audio(t_eid, cache_audio_dir)
+            if not target and use_prov:
+                req = build_provider_request(
+                    "stream",
+                    quality,
+                    t_eid,
+                    t_title,
+                    t_artist,
+                    t_album,
+                    t_dur,
+                    t_isrc,
+                    t_track_num,
+                    t_year,
+                    source=t_src,
+                )
+                cand = resolve_stream_candidate(req, providers_dir)
+                if cand is not None:
+                    target = str(cand.get("url") or cand.get("manifest") or "").strip()
+                    headers = dict(cand.get("headers") or {})
+            if not target:
+                target = _id_to_url(t_eid)
+        else:
+            if use_prov:
+                req = build_provider_request(
+                    "stream",
+                    quality,
+                    t_eid,
+                    t_title,
+                    t_artist,
+                    t_album,
+                    t_dur,
+                    t_isrc,
+                    t_track_num,
+                    t_year,
+                    source=t_src,
+                )
+                cand = resolve_stream_candidate(req, providers_dir)
+                if cand is not None:
+                    target = str(cand.get("url") or cand.get("manifest") or "").strip()
+                    headers = dict(cand.get("headers") or {})
+                    if target:
+                        hid = f"{t_src}:song:{t_eid}"
+            if not target:
+                q = f"{t_artist} {t_title}".strip() if t_artist else t_title
+                yid = (search_fn(q) or "").strip()
+                if not yid:
+                    continue
+                hid = yid
+                target = find_cached_audio(yid, cache_audio_dir) or _id_to_url(yid)
+
+        if not target:
+            continue
+        resolved.append(
+            {
+                "url": target,
+                "title": t_title,
+                "headers": headers,
+                "hid": hid,
+                "meta": meta,
+            }
+        )
+    return resolved
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if not args:
@@ -566,6 +736,19 @@ def main(argv: list[str] | None = None) -> int:
         print(str(raw_path))
         print(json.dumps(info, separators=(",", ":")))
         print(json.dumps(cand, separators=(",", ":")))
+        return 0
+
+    if cmd == "resolve-batch" and len(args) >= 2:
+        try:
+            payload = json.load(sys.stdin)
+        except Exception:
+            return 1
+        items = payload.get("items") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            return 1
+        cache_audio_dir = args[2] if len(args) > 2 and args[2] else None
+        for row in resolve_catalog_batch(items, args[1], pdir, cache_audio_dir=cache_audio_dir):
+            print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
         return 0
 
     return 1

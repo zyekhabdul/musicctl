@@ -842,10 +842,11 @@ class MpvClient:
         playlist = [str(x) for x in (session_data.get("playlist") or []) if x]
         if not playlist:
             return 0
+        target_pos = max(0, min(len(playlist) - 1, int(session_data.get("playlist_pos") or 0)))
         cmds: list[list[Any]] = [["loadfile", playlist[0], "replace"]]
         for u in playlist[1:]:
             cmds.append(["loadfile", u, "append"])
-        cmds.append(["set_property", "playlist-pos", int(session_data.get("playlist_pos") or 0)])
+        cmds.append(["set_property", "playlist-pos", target_pos])
         cmds.append(["set_property", "volume", session_data.get("volume", 100)])
         cmds.append(["set_property", "mute", bool(session_data.get("muted", False))])
         cmds.append(["set_property", "speed", session_data.get("speed", 1)])
@@ -861,8 +862,19 @@ class MpvClient:
         except (TypeError, ValueError):
             tpos = 0.0
         if tpos > 1.0:
-            time.sleep(0.25)
-            self.send(["seek", tpos, "absolute"])
+            deadline = time.monotonic() + max(0.5, min(float(timeout), 8.0))
+            while time.monotonic() < deadline:
+                st = self.batch_get(["idle-active", "playlist-pos", "duration", "seekable"])
+                if st is not None and st.get("idle-active") is False and st.get("playlist-pos") == target_pos:
+                    try:
+                        dur_f = float(st.get("duration") or 0.0)
+                    except (TypeError, ValueError):
+                        dur_f = 0.0
+                    if dur_f > 0.0 or st.get("seekable") is True:
+                        seek_target = min(tpos, max(0.0, dur_f - 0.5)) if dur_f > 1.0 else tpos
+                        if self.send(["seek", seek_target, "absolute"]):
+                            break
+                time.sleep(0.05)
         return len(playlist)
 
     def batch_status_snapshot(self) -> dict[str, Any] | None:
