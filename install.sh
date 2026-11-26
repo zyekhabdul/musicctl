@@ -41,7 +41,8 @@ fi
 BASH_COMP="${DATA_DIR}/bash-completion/completions/musicctl"
 ZSH_COMP="${DATA_DIR}/zsh/site-functions/_musicctl"
 DESKTOP_DST="${DATA_DIR}/applications/musicctl.desktop"
-LIB_DST_DIR="${DATA_DIR}/musicctl"
+LIB_DST_DIR="${PREFIX}/lib/musicctl"
+LEGACY_LIB_DIR="${DATA_DIR}/musicctl"
 LIB_FILES=(common.py catalog.py providers.py downloader.py library.py tui.py mpv_hooks.lua)
 
 if ((UNINSTALL == 1)); then
@@ -49,7 +50,15 @@ if ((UNINSTALL == 1)); then
   for lf in "${LIB_FILES[@]}"; do
     rm -f "${LIB_DST_DIR}/${lf}"
   done
+  rm -rf "${LIB_DST_DIR}/__pycache__"
   rmdir "$LIB_DST_DIR" 2>/dev/null || true
+  if [[ "$LEGACY_LIB_DIR" != "$LIB_DST_DIR" && -d "$LEGACY_LIB_DIR" ]]; then
+    for lf in "${LIB_FILES[@]}"; do
+      rm -f "${LEGACY_LIB_DIR}/${lf}"
+    done
+    rm -rf "${LEGACY_LIB_DIR}/__pycache__"
+    rmdir "$LEGACY_LIB_DIR" 2>/dev/null || true
+  fi
   echo "[OK] Uninstalled musicctl from ${PREFIX}"
   exit 0
 fi
@@ -58,6 +67,12 @@ install -Dm755 "${SCRIPT_DIR}/bin/musicctl" "${BIN_DIR}/musicctl"
 for lf in "${LIB_FILES[@]}"; do
   install -Dm644 "${SCRIPT_DIR}/lib/${lf}" "${LIB_DST_DIR}/${lf}"
 done
+if [[ "$LEGACY_LIB_DIR" != "$LIB_DST_DIR" && -d "$LEGACY_LIB_DIR" ]]; then
+  for lf in "${LIB_FILES[@]}"; do
+    rm -f "${LEGACY_LIB_DIR}/${lf}"
+  done
+  rm -rf "${LEGACY_LIB_DIR}/__pycache__"
+fi
 install -Dm644 "${SCRIPT_DIR}/completions/musicctl.bash" "$BASH_COMP"
 install -Dm644 "${SCRIPT_DIR}/completions/_musicctl" "$ZSH_COMP"
 install -Dm644 "${SCRIPT_DIR}/musicctl.desktop" "$DESKTOP_DST"

@@ -7,10 +7,12 @@ import html
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -92,6 +94,17 @@ def extract_video_id(value: str) -> str:
 
 def _norm_meta(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def split_shell_args(raw: str) -> list[str]:
+    """Split a shell-style argument string preserving quoted spaces without shell eval."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        return shlex.split(text, posix=True)
+    except ValueError:
+        return text.split()
 
 
 _TITLE_NOISE_TAG_RE = re.compile(
@@ -459,7 +472,9 @@ def fetch_lyrics(
                 obj = json.loads(resp.read().decode("utf-8", errors="replace"))
             if isinstance(obj, dict) and (obj.get("syncedLyrics") or obj.get("plainLyrics")):
                 chosen = obj
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
             chosen = None
 
     if chosen is None and a_in and clean_title:
@@ -473,7 +488,9 @@ def fetch_lyrics(
                 items = json.loads(resp.read().decode("utf-8", errors="replace"))
             if isinstance(items, list):
                 chosen = pick_best_lyrics_candidate(items, clean_title, a_in, duration)
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
             chosen = None
 
     if chosen is None:
@@ -488,7 +505,9 @@ def fetch_lyrics(
                     items = json.loads(resp.read().decode("utf-8", errors="replace"))
                 if isinstance(items, list):
                     chosen = pick_best_lyrics_candidate(items, clean_title or q_str, a_in, duration)
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
                 chosen = None
 
     if chosen:
@@ -527,8 +546,9 @@ def fetch_lyrics(
                     "plain_text": "\n".join(txt for _, txt in fb_res[1]),
                     "synced_lines": [],
                 }
-        except Exception:
-            pass
+        except Exception as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
     return None
 
 
@@ -1147,6 +1167,13 @@ def main(argv: list[str] | None = None) -> int:
         if cnt <= 0:
             return 1
         print(cnt)
+        return 0
+
+    if cmd == "split-args":
+        raw = args[1] if len(args) >= 2 else sys.stdin.read()
+        toks = split_shell_args(raw)
+        if toks:
+            sys.stdout.write("\0".join(toks) + "\0")
         return 0
 
     return 1

@@ -140,6 +140,8 @@ find_lib_file() {
   self_dir="$(dirname "$SELF_BIN")"
   for p in \
     "$self_dir/../lib/$name" \
+    "$self_dir/../lib/musicctl/$name" \
+    "/usr/lib/musicctl/$name" \
     "$self_dir/../share/musicctl/$name" \
     "${XDG_DATA_HOME:-$HOME/.local/share}/musicctl/$name" \
     "/usr/share/musicctl/$name"; do
@@ -395,9 +397,10 @@ ensure_daemon() {
   fi
 
   if [[ -n "$MUSICCTL_MPV_EXTRA_ARGS" ]]; then
-    local -a extra_args=()
-    read -r -a extra_args <<<"$MUSICCTL_MPV_EXTRA_ARGS"
-    args+=("${extra_args[@]}")
+    local tok
+    while IFS= read -r -d '' tok; do
+      [[ -n "$tok" ]] && args+=("$tok")
+    done < <(run_common_py split-args "$MUSICCTL_MPV_EXTRA_ARGS")
   fi
 
   setsid -f mpv "${args[@]}" >/dev/null 2>"$MPV_LOG" </dev/null

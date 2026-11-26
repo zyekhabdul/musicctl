@@ -549,7 +549,19 @@ class SovereignDashboard:
 
     def __init__(self, stdscr: curses.window, initial_query: str = "") -> None:
         self.stdscr = stdscr
-        self.bin_path = os.environ.get("MUSICCTL_BIN") or str(Path(__file__).resolve().parent.parent / "bin" / "musicctl")
+        here = Path(__file__).resolve()
+        fallback_bin = next(
+            (
+                str(p)
+                for p in (
+                    here.parent.parent / "bin" / "musicctl",
+                    here.parent.parent.parent / "bin" / "musicctl",
+                )
+                if p.is_file()
+            ),
+            str(here.parent.parent / "bin" / "musicctl"),
+        )
+        self.bin_path = os.environ.get("MUSICCTL_BIN") or fallback_bin
         self.sock_path = os.environ.get("MUSICCTL_SOCKET") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "musicctl.sock")
         self.data_dir = Path(os.environ.get("MUSICCTL_DATA_DIR") or os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "musicctl"))
         self.cache_dir = Path(os.environ.get("MUSICCTL_CACHE_DIR") or os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "musicctl"))
