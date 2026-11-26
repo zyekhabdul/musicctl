@@ -3448,6 +3448,116 @@ class TestUXClarityPolish(unittest.TestCase):
         self.assertEqual(browsed["items"][0]["album"], "Collab Album")
         self.assertEqual(browsed["items"][0]["duration"], 190)
 
+    def test_header_title_normalization_and_render(self):
+        import tui_widgets
+
+        self.assertEqual(
+            tui_widgets.format_header_title("grentperez - When We Were Younger (feat. Cavetown) (Official Audio)", "grentperez"),
+            "When We Were Younger (feat. Cavetown)",
+        )
+        self.assertEqual(
+            tui_widgets.format_header_title("GRENTPEREZ — When We Were Younger [Official Video]", "grentperez"),
+            "When We Were Younger",
+        )
+        self.assertEqual(
+            tui_widgets.format_header_title("To the Bone (Acoustic)", "Pamungkas"),
+            "To the Bone (Acoustic)",
+        )
+        self.assertEqual(tui_widgets.format_header_title("", "Pamungkas"), "")
+        self.assertEqual(tui_widgets.format_header_title("watch?v=dQw4w9WgXcQ", ""), "watch?v=dQw4w9WgXcQ")
+
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            scr = RecordingStdscr(30, 120)
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.mpv_state = {
+                "idle-active": False,
+                "pause": False,
+                "media-title": "grentperez - When We Were Younger (feat. Cavetown) (Official Audio)",
+                "metadata": {"artist": "grentperez"},
+                "time-pos": 10.0,
+                "duration": 241.0,
+                "volume": 100,
+                "mute": False,
+            }
+            d.render()
+            row1 = scr.row_text(1)
+            self.assertIn("When We Were Younger (feat. Cavetown)", row1)
+            self.assertNotIn("grentperez -", row1)
+            self.assertNotIn("(Official", row1)
+
+    def test_common_parse_meta_fields_ssot(self):
+        self.assertEqual(
+            common_mod.parse_meta_fields("David Guetta & Sia • Nothing But the Beat • 2:28"),
+            {"artist": "David Guetta & Sia", "album": "Nothing But the Beat", "duration": 148, "duration_str": "2:28"},
+        )
+        self.assertEqual(
+            common_mod.parse_meta_fields("Pamungkas • 5:45"),
+            {"artist": "Pamungkas", "album": "", "duration": 345, "duration_str": "5:45"},
+        )
+        self.assertEqual(
+            common_mod.parse_meta_fields("Artist X • 1:02:03"),
+            {"artist": "Artist X", "album": "", "duration": 3723, "duration_str": "1:02:03"},
+        )
+        self.assertEqual(
+            common_mod.parse_meta_fields("Album • Pamungkas • 2018"),
+            {"artist": "", "album": "", "duration": 0, "duration_str": ""},
+        )
+        self.assertEqual(
+            common_mod.parse_meta_fields("Pamungkas • 2018 • 1.2M plays • Active • #3 • 03:30"),
+            {"artist": "Pamungkas", "album": "", "duration": 210, "duration_str": "03:30"},
+        )
+        self.assertEqual(
+            common_mod.parse_meta_fields("Local Audio"),
+            {"artist": "", "album": "", "duration": 0, "duration_str": ""},
+        )
+
+        # Parity across downloader, tui_widgets, and common CLI
+        sample = "Pamungkas • Walk the Talk • 05:45 • Active"
+        self.assertEqual(downloader_mod._parse_meta_fields(sample), ("Pamungkas", "Walk the Talk", 345))
+        self.assertEqual(tui.extract_album_from_meta(sample), "Walk the Talk")
+        self.assertEqual(tui.parse_track_columns("To the Bone", sample), ("Pamungkas", "To the Bone", "Walk the Talk", "05:45"))
+
+        cli_out = subprocess.check_output(
+            ["python3", str(Path(__file__).resolve().parent.parent / "lib" / "common.py"), "parse-meta", " • 04:01"],
+            text=True,
+        )
+        self.assertEqual(cli_out.splitlines(), ["", "", "241"])
+
 
 if __name__ == "__main__":
     unittest.main()
