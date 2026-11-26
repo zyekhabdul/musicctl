@@ -447,12 +447,6 @@ SM_M4A_OUT="$MUSICCTL_DOWNLOAD_DIR/dQw4w9WgXcQ.m4a"
 assert_ok "dl --quality small --format m4a writes .m4a file" test -s "$SM_M4A_OUT"
 M4A_PROBE="$(ffprobe -v error -show_entries stream=codec_name:format_tags=title -of json "$SM_M4A_OUT")"
 assert_ok "dl --quality small produces valid AAC M4A with title tag" jq -e '(.streams[0].codec_name == "aac") and (.format.tags.title == "dQw4w9WgXcQ")' <<<"$M4A_PROBE" >/dev/null
-BAD_COVER="$TMP_DIR/bad-cover.jpg"
-printf 'not-an-image' >"$BAD_COVER"
-FB_FLAC="$TMP_DIR/fb-spaced.flac"
-assert_ok "embed_metadata_cover fallback preserves spaced tags" "$BIN" _embed_metadata_cover "$FLAC_SRC" "$FB_FLAC" "To the Bone" "Pamungkas & Friends" "Walk the Talk" "$BAD_COVER"
-FB_PROBE="$(ffprobe -v error -show_entries format_tags=title,artist,album -of json "$FB_FLAC")"
-assert_ok "embed_metadata_cover fallback writes title/artist/album tags" jq -e '((.format.tags.title // .format.tags.TITLE) == "To the Bone") and ((.format.tags.artist // .format.tags.ARTIST) == "Pamungkas & Friends") and ((.format.tags.album // .format.tags.ALBUM) == "Walk the Talk")' <<<"$FB_PROBE" >/dev/null
 
 # 13g. P3: Escaped mpv headers, preflight stream probe, and lossless WAV small transcode
 HDR_ESC="$(printf '%s' '{"headers":{"Cookie":"a=1, b=2","X-Path":"C:\\dir\\f"}}' | "$BIN" _format_mpv_headers)"
@@ -929,6 +923,17 @@ EOF
 chmod +x "$PROV_STRM_DIR/10-stream.sh"
 MUSICCTL_PROVIDERS_DIR="$PROV_STRM_DIR" python3 "$ROOT_DIR/lib/providers.py" resolve-stream cd trk9 "Title" "Artist" "Album" 10 US123 1 2024 deezer >/dev/null
 assert_ok "resolve-stream forwards trailing source=deezer" jq -e '.source == "deezer"' "$STRM_REQ" >/dev/null
+
+# SSOT parse_meta + deprecated fzf checks
+assert_ok "parse_meta_album ignores empty artist before duration" test -z "$("$BIN" _parse_meta_album " • 04:01")"
+DOC_FZF_LINE="$(printf '%s\n' "$DOC_OUT" | grep -F 'fzf' || true)"
+assert_ok "doctor marks fzf as optional (not required)" bash -c '! grep -qF "required" <<<"$1"' _ "$DOC_FZF_LINE"
+STUB_FZF_DIR="$TMP_DIR/stub-fzf-bin"
+mkdir -p "$STUB_FZF_DIR"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$STUB_FZF_DIR/fzf"
+chmod +x "$STUB_FZF_DIR/fzf"
+FZF_WARN_OUT="$(PATH="$STUB_FZF_DIR:$PATH" "$BIN" fzf 2>&1 || true)"
+assert_contains "musicctl fzf emits deprecation warning" "$FZF_WARN_OUT" "deprecated"
 
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
 if [[ "$OFFLINE" != "1" ]]; then

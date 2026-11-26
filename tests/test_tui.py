@@ -3349,6 +3349,105 @@ class TestUXClarityPolish(unittest.TestCase):
         self.assertEqual(tui.build_context_hints("queue")[1], ("J/K", "Move"))
         self.assertEqual(tui.build_context_hints("search", has_nav=True)[-2], ("Bksp", "Back"))
 
+    def test_ytm_multi_artist_runs_keep_album_intact(self):
+        search_raw = {
+            "contents": {
+                "musicShelfRenderer": {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": {"videoId": "abc12345678"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "When We Were Young (The Logical Song)"}]}}},
+                                    {
+                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                            "text": {
+                                                "runs": [
+                                                    {"text": "David Guetta"},
+                                                    {"text": " & "},
+                                                    {"text": "Sia"},
+                                                    {"text": " • "},
+                                                    {"text": "Nothing But the Beat"},
+                                                    {"text": " • "},
+                                                    {"text": "2:28"},
+                                                ]
+                                            }
+                                        }
+                                    },
+                                ],
+                            }
+                        },
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": {"videoId": "def12345678"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Coming Over"}]}}},
+                                    {
+                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                            "text": {
+                                                "runs": [
+                                                    {"text": "Dillon Francis"},
+                                                    {"text": ", "},
+                                                    {"text": "Kygo"},
+                                                    {"text": " & "},
+                                                    {"text": "James Hersey"},
+                                                    {"text": " • "},
+                                                    {"text": "This Mixtape Is Fire"},
+                                                    {"text": " • "},
+                                                    {"text": "2:58"},
+                                                ]
+                                            }
+                                        }
+                                    },
+                                ],
+                            }
+                        },
+                    ]
+                }
+            }
+        }
+        songs = catalog.parse_ytm_search(search_raw, "songs")
+        self.assertEqual(len(songs), 2)
+        self.assertEqual(songs[0]["artist"], "David Guetta & Sia")
+        self.assertEqual(songs[0]["album"], "Nothing But the Beat")
+        self.assertEqual(songs[0]["duration"], 148)
+        self.assertEqual(songs[1]["artist"], "Dillon Francis, Kygo & James Hersey")
+        self.assertEqual(songs[1]["album"], "This Mixtape Is Fire")
+        self.assertEqual(songs[1]["duration"], 178)
+
+        browse_raw = {
+            "header": {
+                "musicResponsiveHeaderRenderer": {
+                    "title": {"runs": [{"text": "Collab Album"}]},
+                    "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "2018"}]},
+                    "straplineTextOne": {"runs": [{"text": "David Guetta"}, {"text": " & "}, {"text": "Sia"}]},
+                }
+            },
+            "contents": {
+                "musicShelfRenderer": {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": {"videoId": "ghi12345678"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Track One"}]}}},
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "David Guetta"}, {"text": " & "}, {"text": "Sia"}]}}},
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Collab Album"}, {"text": " • "}, {"text": "3:10"}]}}},
+                                ],
+                            }
+                        }
+                    ]
+                }
+            },
+        }
+        browsed = catalog.parse_ytm_browse(browse_raw, "MPREb_collab123")
+        self.assertEqual(browsed["entity"]["artist"], "David Guetta & Sia")
+        self.assertEqual(browsed["entity"]["year"], 2018)
+        self.assertEqual(len(browsed["items"]), 1)
+        self.assertEqual(browsed["items"][0]["artist"], "David Guetta & Sia")
+        self.assertEqual(browsed["items"][0]["album"], "Collab Album")
+        self.assertEqual(browsed["items"][0]["duration"], 190)
+
 
 if __name__ == "__main__":
     unittest.main()
