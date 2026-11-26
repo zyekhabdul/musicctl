@@ -112,6 +112,7 @@ def compute_rmpc_layout(
     mode: str = "auto",
     show_drawer: bool = True,
     search_bar: bool = False,
+    active_tab: str = "queue",
 ) -> dict[str, Any]:
     """Compute rmpc-style layout rectangles (y0, h, x0, w) with strict bounds clamping."""
     compact = h < 18
@@ -168,10 +169,27 @@ def compute_rmpc_layout(
 
     content_rect = (cy, ch, 0, w)
     req_mode = mode if mode in LAYOUT_MODES else "auto"
+    art_rect: tuple[int, int, int, int] | None = None
+    lyrics_rect: tuple[int, int, int, int] | None = None
+    drawer_rect: tuple[int, int, int, int] | None = None
+
     if req_mode == "focus" or not show_drawer:
         effective = "focus"
         list_rect = (cy, ch, 0, w)
-        drawer_rect: tuple[int, int, int, int] | None = None
+    elif active_tab == "queue" and req_mode in ("auto", "split") and w >= 88:
+        effective = "split"
+        side_w = max(28, int(w * 0.35))
+        table_w = w - side_w
+        if ch >= 10:
+            art_h = ch // 2
+            art_rect = (cy, art_h, 0, side_w)
+            lyrics_rect = (cy + art_h, ch - art_h, 0, side_w)
+        else:
+            lyrics_rect = (cy, ch, 0, side_w)
+        list_rect = (cy, ch, side_w, table_w)
+    elif active_tab != "queue" and req_mode == "auto":
+        effective = "focus"
+        list_rect = (cy, ch, 0, w)
     elif (req_mode == "split" or (req_mode == "auto" and w >= 96)) and w >= 64:
         effective = "split"
         left_w = max(36, min(w - 28, int(w * 0.62)))
@@ -182,7 +200,6 @@ def compute_rmpc_layout(
         effective = "stacked"
         if ch < 10:
             list_rect = (cy, ch, 0, w)
-            drawer_rect = None
         else:
             dr_h = max(4, min(14, int(ch * 0.34)))
             list_h = ch - dr_h
@@ -197,6 +214,8 @@ def compute_rmpc_layout(
         "tabs": tabs_rect,
         "search_bar": search_rect,
         "content": content_rect,
+        "art": art_rect,
+        "lyrics": lyrics_rect,
         "list": list_rect,
         "drawer": drawer_rect,
         "now_playing": None,
@@ -204,6 +223,126 @@ def compute_rmpc_layout(
         "footer_mode": footer_mode,
         "footer_progress": footer_progress,
     }
+
+
+_DUR_TOKEN_RE = re.compile(r"^\d+:\d{2}(?::\d{2})?$")
+_META_NOISE = {"Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"}
+
+
+def parse_track_columns(title: str, meta: str, tag: str = "") -> tuple[str, str, str, str]:
+    """Extract (artist, clean_title, album, duration) from row fields."""
+    clean_title = (title or "").strip()
+    artist = ""
+    album = ""
+    duration = ""
+    extra: list[str] = []
+
+    for part in (meta or "").split("•"):
+        tok = part.strip()
+        if not tok or tok in _META_NOISE or re.match(r"^#\d+$", tok):
+            continue
+        if not duration and _DUR_TOKEN_RE.match(tok):
+            duration = tok
+            continue
+        extra.append(tok)
+
+    if extra:
+        artist = extra[0]
+        if len(extra) >= 2:
+            album = extra[1]
+
+    if not artist and " - " in clean_title:
+        left, right = clean_title.split(" - ", 1)
+        if left.strip() and right.strip():
+            artist = left.strip()
+            clean_title = right.strip()
+
+    return (artist or "-", clean_title or "-", album or "-", duration or "-")
+
+
+def compute_table_col_widths(avail_w: int) -> tuple[int, int, int, int] | None:
+    """Compute (artist_w, title_w, album_w, dur_w) for 4-column table, or None when narrow."""
+    if avail_w < 54:
+        return None
+    usable = avail_w - 6
+    artist_w = max(8, int(usable * 0.20))
+    title_w = max(14, int(usable * 0.35))
+    album_w = max(10, int(usable * 0.30))
+    dur_w = usable - artist_w - title_w - album_w
+    if dur_w < 6:
+        need = 6 - dur_w
+        take_alb = min(need, max(0, album_w - 6))
+        album_w -= take_alb
+        need -= take_alb
+        take_ttl = min(need, max(0, title_w - 10))
+        title_w -= take_ttl
+        dur_w = usable - artist_w - title_w - album_w
+    return (artist_w, title_w, album_w, dur_w)
+
+
+def _pad_cell_left(text: str, width: int) -> str:
+    clipped = truncate_width(text, width)
+    return clipped + " " * max(0, width - display_width(clipped))
+
+
+def _pad_cell_right(text: str, width: int) -> str:
+    clipped = truncate_width(text, width)
+    return " " * max(0, width - display_width(clipped)) + clipped
+
+
+def format_table_header(avail_w: int) -> str:
+    """Format aligned 4-column table header row."""
+    cols = compute_table_col_widths(avail_w)
+    if cols is None:
+        return truncate_width("Track", avail_w)
+    aw, tw, bw, dw = cols
+    return "  ".join(
+        [
+            _pad_cell_left("Artist", aw),
+            _pad_cell_left("Title", tw),
+            _pad_cell_left("Album", bw),
+            _pad_cell_right("Duration", dw),
+        ]
+    )
+
+
+def format_table_row_4col(artist: str, title: str, album: str, duration: str, avail_w: int) -> str:
+    """Format track fields into 4 aligned columns or compact fallback when narrow."""
+    cols = compute_table_col_widths(avail_w)
+    if cols is None:
+        compact_meta = " • ".join(p for p in (artist, album, duration) if p and p != "-")
+        return format_track_row_columns(title, compact_meta, avail_w)
+    aw, tw, bw, dw = cols
+    return "  ".join(
+        [
+            _pad_cell_left(artist, aw),
+            _pad_cell_left(title, tw),
+            _pad_cell_left(album, bw),
+            _pad_cell_right(duration, dw),
+        ]
+    )
+
+
+def build_vertical_scrollbar(total: int, visible: int, offset: int, height: int) -> list[str]:
+    """Build rmpc-style vertical scrollbar glyph column using │, █, ▲, ▼."""
+    if height <= 0:
+        return []
+    if total <= visible or total <= 0:
+        return ["│"] * height
+    if height == 1:
+        return ["█"]
+    if height == 2:
+        return ["▲", "▼"]
+    track_h = height - 2
+    thumb_h = max(1, min(track_h, int(round((visible / float(total)) * track_h))))
+    max_off = max(1, total - visible)
+    clamped_off = max(0, min(max_off, offset))
+    max_top = track_h - thumb_h
+    thumb_top = int(round((clamped_off / float(max_off)) * max_top)) if max_top > 0 else 0
+    cells = ["│"] * track_h
+    for i in range(thumb_top, min(track_h, thumb_top + thumb_h)):
+        cells[i] = "█"
+    return ["▲", *cells, "▼"]
 
 
 def format_queue_summary(playlist: list[dict[str, Any]], cur_duration: float = 0.0) -> str:
@@ -506,3 +645,117 @@ def parse_download_jsonl_line(line: str) -> dict[str, Any] | None:
         "dest": str(obj.get("dest") or ""),
         "error": str(obj.get("error") or ""),
     }
+
+
+def merge_fav_and_history(
+    fav_rows: list[tuple[str, str, str, str]],
+    hist_rows: list[tuple[str, str, str, str]],
+) -> list[tuple[str, str, str, str]]:
+    """Merge Favorites and History TSV rows deduplicated by track id, keeping favorites first."""
+    seen: set[str] = set()
+    merged: list[tuple[str, str, str, str]] = []
+    for row in fav_rows + hist_rows:
+        rid = row[0] if row else ""
+        if rid and rid not in seen:
+            seen.add(rid)
+            merged.append(row)
+    return merged
+
+
+def _collect_entity_source_tracks(
+    local_entries: list[dict[str, Any]],
+    fav_rows: list[tuple[str, str, str, str]],
+    hist_rows: list[tuple[str, str, str, str]],
+) -> list[tuple[str, str, str, tuple[str, str, str, str]]]:
+    """Normalize local library, favorites, and history into (artist, album, title_key, row) tuples."""
+    items: list[tuple[str, str, str, tuple[str, str, str, str]]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for e in local_entries:
+        path = str(e.get("path") or "").strip()
+        if not path:
+            continue
+        artist = str(e.get("artist") or "").strip()
+        album = str(e.get("album") or "").strip()
+        title = str(e.get("title") or e.get("filename") or path).strip()
+        dur = int(e.get("duration") or 0)
+        dur_lbl = format_mmss(dur) if dur > 0 else str(e.get("codec") or "").strip()
+        meta = " • ".join(p for p in (artist, album, dur_lbl) if p) or "Local Audio"
+        dedup_k = (path, title.lower())
+        if dedup_k in seen_keys:
+            continue
+        seen_keys.add(dedup_k)
+        items.append((artist, album, title.lower(), (path, title, meta, "[LOC]")))
+
+    for vid, title, meta, tag in fav_rows + hist_rows:
+        rid = (vid or "").strip()
+        if not rid:
+            continue
+        art_p, ttl_p, alb_p, _dur = parse_track_columns(title, meta, tag)
+        artist = "" if art_p == "-" else art_p
+        album = "" if alb_p == "-" else alb_p
+        dedup_k = (rid, ttl_p.lower())
+        if dedup_k in seen_keys:
+            continue
+        seen_keys.add(dedup_k)
+        items.append((artist, album, ttl_p.lower(), (rid, title, meta, tag)))
+
+    return items
+
+
+def aggregate_artists(
+    local_entries: list[dict[str, Any]],
+    fav_rows: list[tuple[str, str, str, str]],
+    hist_rows: list[tuple[str, str, str, str]],
+) -> tuple[list[tuple[str, str, str, str]], dict[str, list[tuple[str, str, str, str]]]]:
+    """Aggregate merged local/favorites/history tracks grouped by artist."""
+    buckets: dict[str, list[tuple[str, str, str, str]]] = {}
+    display_names: dict[str, str] = {}
+    for artist, _album, _tkey, row in _collect_entity_source_tracks(local_entries, fav_rows, hist_rows):
+        disp = artist or "Unknown Artist"
+        norm_k = disp.lower()
+        display_names.setdefault(norm_k, disp)
+        buckets.setdefault(norm_k, []).append(row)
+
+    summary_rows: list[tuple[str, str, str, str]] = []
+    groups_map: dict[str, list[tuple[str, str, str, str]]] = {}
+    for norm_k in sorted(buckets.keys(), key=lambda k: (1 if display_names[k] == "Unknown Artist" else 0, k)):
+        disp = display_names[norm_k]
+        tracks = buckets[norm_k]
+        key = f"eart:{disp}"
+        groups_map[key] = tracks
+        summary_rows.append((key, disp, f"{len(tracks)} tracks", "[E-ART]"))
+    return summary_rows, groups_map
+
+
+def aggregate_albums(
+    local_entries: list[dict[str, Any]],
+    fav_rows: list[tuple[str, str, str, str]],
+    hist_rows: list[tuple[str, str, str, str]],
+) -> tuple[list[tuple[str, str, str, str]], dict[str, list[tuple[str, str, str, str]]]]:
+    """Aggregate merged local/favorites/history tracks grouped by album."""
+    buckets: dict[str, list[tuple[str, tuple[str, str, str, str]]]] = {}
+    display_names: dict[str, str] = {}
+    for artist, album, _tkey, row in _collect_entity_source_tracks(local_entries, fav_rows, hist_rows):
+        disp = album or "Unknown Album"
+        norm_k = disp.lower()
+        display_names.setdefault(norm_k, disp)
+        buckets.setdefault(norm_k, []).append((artist, row))
+
+    summary_rows: list[tuple[str, str, str, str]] = []
+    groups_map: dict[str, list[tuple[str, str, str, str]]] = {}
+    for norm_k in sorted(buckets.keys(), key=lambda k: (1 if display_names[k] == "Unknown Album" else 0, k)):
+        disp = display_names[norm_k]
+        pairs = buckets[norm_k]
+        tracks = [r for _a, r in pairs]
+        artists = {a for a, _r in pairs if a}
+        if len(artists) == 1:
+            artist_lbl = next(iter(artists))
+        elif len(artists) > 1:
+            artist_lbl = "Various Artists"
+        else:
+            artist_lbl = "Unknown Artist"
+        key = f"ealb:{disp}"
+        groups_map[key] = tracks
+        summary_rows.append((key, disp, f"{artist_lbl} • {len(tracks)} tracks", "[E-ALB]"))
+    return summary_rows, groups_map

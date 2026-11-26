@@ -46,25 +46,33 @@ from tui_widgets import (
     SGR_RE,
     WAVE_BARS,
     Hitbox,
+    aggregate_albums,
+    aggregate_artists,
     apply_search_key,
     build_lightweight_wave,
     build_progress_bar,
+    build_vertical_scrollbar,
     build_volume_slider,
     calc_art_size,
     calc_seek_target,
     calc_vol_target,
     compute_layout,
     compute_rmpc_layout,
+    compute_table_col_widths,
     display_width,
     enrich_tsv_entry,
     extract_album_from_meta,
     format_album_line,
     format_audio_badge,
     format_queue_summary,
+    format_table_header,
+    format_table_row_4col,
     format_track_row_columns,
     is_placeholder_title,
+    merge_fav_and_history,
     parse_ansi_art,
     parse_download_jsonl_line,
+    parse_track_columns,
     truncate_width,
 )
 
@@ -271,6 +279,7 @@ class SovereignDashboard:
         self.search_seq = 0
         self.browse_seq = 0
         self.show_help = False
+        self.active_modal = ""
 
         cat_env = (os.environ.get("MUSICCTL_CATALOG") or "ytm").strip().lower()
         self.catalog_source = cat_env if cat_env in self.CATALOG_SOURCES else "ytm"
@@ -281,6 +290,7 @@ class SovereignDashboard:
         self.drill_ref = ""
         self.drill_kind = ""
         self._local_groups: dict[str, list[dict[str, Any]]] = {}
+        self._entity_groups: dict[str, list[tuple[str, str, str, str]]] = {}
 
         self.tracks: list[tuple[str, str, str, str]] = []
         self.search_results: list[tuple[str, str, str, str]] = []
@@ -619,42 +629,54 @@ class SovereignDashboard:
                 self.scroll_top = self.selected_idx
             return
 
-        if self.active_tab == "home":
+        if self.active_tab in ("home", "hist"):
             favs = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
             hist = self.read_tsv(self.data_dir / "history.tsv", "[HIS]")
-            seen: set[str] = set()
-            merged: list[tuple[str, str, str, str]] = []
-            for row in favs + hist:
-                if row[0] not in seen:
-                    seen.add(row[0])
-                    merged.append(row)
-            self.tracks = merged
+            self.tracks = merge_fav_and_history(favs, hist)
         elif self.active_tab == "search":
             self.tracks = list(self.search_results)
         elif self.active_tab == "fav":
             self.tracks = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
-        elif self.active_tab == "hist":
-            self.tracks = self.read_tsv(self.data_dir / "history.tsv", "[HIS]")
         elif self.active_tab == "queue":
             pl = self.mpv_state.get("playlist") or []
             qitems: list[tuple[str, str, str, str]] = []
+            cur_mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+            cur_dur = float(self.mpv_state.get("duration") or 0.0)
             for idx, entry in enumerate(pl):
                 fname = entry.get("filename") or ""
                 title = entry.get("title") or fname or "Unknown"
                 vid = extract_video_id(fname)
-                state_lbl = "Active" if entry.get("current") else "Queued"
-                qitems.append((vid, title, f"#{idx + 1} • {state_lbl}", "[Q]"))
+                is_cur = bool(entry.get("current"))
+                parts: list[str] = []
+                if is_cur:
+                    if cur_mf.get("artist"):
+                        parts.append(cur_mf["artist"])
+                    if cur_mf.get("album"):
+                        parts.append(cur_mf["album"])
+                    if cur_dur > 0:
+                        parts.append(format_mmss(cur_dur))
+                if not parts:
+                    parts.append(f"#{idx + 1}")
+                    parts.append("Active" if is_cur else "Queued")
+                qitems.append((vid, title, " • ".join(parts), "[Q]"))
             self.tracks = qitems
-        elif self.active_tab == "artists":
-            self.tracks = self.load_local_grouped("artist")
-        elif self.active_tab == "albums":
-            self.tracks = self.load_local_grouped("album")
+        elif self.active_tab in ("artists", "albums"):
+            entries = library.scan_library(self.download_dir, self.cache_dir / "library.json")
+            favs = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
+            hist = self.read_tsv(self.data_dir / "history.tsv", "[HIS]")
+            if self.active_tab == "artists":
+                rows, groups = aggregate_artists(entries, favs, hist)
+            else:
+                rows, groups = aggregate_albums(entries, favs, hist)
+            self._entity_groups = groups
+            self.tracks = rows
         elif self.active_tab == "local":
             self.tracks = self.load_local_grouped()
         elif self.active_tab == "playlists":
             self.tracks = self.load_playlists_list()
         elif self.active_tab == "lyrics":
             self.right_tab = "lyrics"
+            self._ensure_lyrics_for_current()
 
         if self.selected_idx >= len(self.tracks):
             self.selected_idx = max(0, len(self.tracks) - 1)
@@ -1313,9 +1335,122 @@ class SovereignDashboard:
         self.add_hitbox(box_x, y, box_x + box_w, y + 1, "focus_search", None)
 
         bx = box_x + box_w + 1
-        search_lbl = "..." if self.search_loading else "Search"
-        bx = self.draw_button(y, bx, search_lbl, "do_search", None, active=self.search_loading)
+        search_lbl = "..." if getattr(self, "search_loading", False) else "Search"
+        bx = self.draw_button(y, bx, search_lbl, "do_search", None, active=bool(getattr(self, "search_loading", False)))
         self.draw_button(y, bx, "Clear", "clear_search", None)
+
+    def _draw_scrollbar_col(self, x: int, y_start: int, total: int, visible: int, offset: int, border_attr: int) -> None:
+        glyphs = build_vertical_scrollbar(total, visible, offset, visible)
+        for ri, ch in enumerate(glyphs):
+            attr = (curses.color_pair(PAIR_CYAN) | curses.A_BOLD) if ch == "█" else border_attr
+            self.safe_addstr(y_start + ri, x, ch, attr)
+
+    def _render_lyrics_body(self, y_start: int, body_h: int, x0: int, w: int, border_attr: int) -> None:
+        b_inner_w = max(1, w - 4)
+        idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
+        d_scroll = max(0, getattr(self, "drawer_scroll", 0))
+        if self.lyrics_loading:
+            self.safe_addstr(y_start, x0 + 2, truncate_width(self.lyrics_header, b_inner_w), curses.color_pair(PAIR_CYAN))
+            return
+        if not self.lyrics_lines:
+            hdr_msg = self.lyrics_header or "Play a track to auto-load lyrics"
+            self.safe_addstr(y_start, x0 + 2, truncate_width(hdr_msg, b_inner_w), curses.color_pair(PAIR_DIM))
+            if not idle and body_h >= 2:
+                mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+                ctx_bits = [b for b in (mf.get("artist"), format_album_line(mf.get("album", ""), mf.get("year", 0))) if b]
+                if ctx_bits:
+                    self.safe_addstr(y_start + 1, x0 + 2, truncate_width(" • ".join(ctx_bits), b_inner_w), curses.color_pair(PAIR_ICE))
+            return
+
+        self.safe_addstr(y_start, x0 + 2, truncate_width(self.lyrics_header, b_inner_w), curses.color_pair(PAIR_PURPLE) | curses.A_BOLD)
+        tpos = float(self.mpv_state.get("time-pos") or 0.0)
+        active_l = 0
+        if self.lyrics_lines[0][0] is not None:
+            for li, (ts, _txt) in enumerate(self.lyrics_lines):
+                if ts is not None and ts <= tpos + 0.15:
+                    active_l = li
+                else:
+                    break
+        body_rows = max(0, body_h - 1)
+        if d_scroll > 0:
+            start_l = min(max(0, len(self.lyrics_lines) - max(1, body_rows)), d_scroll)
+        else:
+            start_l = max(0, active_l - max(1, body_rows // 3))
+        for row_i in range(body_rows):
+            li = start_l + row_i
+            if li >= len(self.lyrics_lines):
+                break
+            ts, ltxt = self.lyrics_lines[li]
+            is_cur_l = ts is not None and li == active_l
+            prefix = "▸ " if is_cur_l else "  "
+            attr = curses.color_pair(PAIR_LYRIC_ACTIVE if is_cur_l else (PAIR_DIM if ts is not None and li < active_l else PAIR_DEFAULT))
+            if is_cur_l:
+                attr |= curses.A_BOLD
+            self.safe_addstr(y_start + 1 + row_i, x0 + 2, truncate_width(prefix + ltxt, b_inner_w), attr)
+        if body_rows > 0:
+            self._draw_scrollbar_col(x0 + w - 1, y_start + 1, len(self.lyrics_lines), body_rows, start_l, border_attr)
+
+    def render_queue_art_lyrics_pane(
+        self,
+        art_rect: tuple[int, int, int, int] | None,
+        lyrics_rect: tuple[int, int, int, int] | None,
+    ) -> None:
+        focused = getattr(self, "focus_pane", "list") == "drawer"
+        b_attr = curses.color_pair(PAIR_CYAN if focused else PAIR_BOX) | (curses.A_BOLD if focused else 0)
+        cur_path = str(self.mpv_state.get("path") or "")
+        cur_vid = extract_video_id(cur_path) if cur_path else ""
+        sel_vid = self.tracks[self.selected_idx][0] if self.tracks and self.selected_idx < len(self.tracks) else ""
+        art_vid = cur_vid if VIDEO_ID_RE.match(cur_vid) else sel_vid
+
+        if art_rect is not None:
+            ay, ah, ax, aw = art_rect
+            self.safe_addstr(ay, ax, "╭" + "─" * max(0, aw - 2) + "╮", b_attr)
+            if aw > 14:
+                self.safe_addstr(ay, ax + 2, " Album Art ", curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            for r in range(1, ah):
+                self.safe_addstr(ay + r, ax, "│", b_attr)
+                self.safe_addstr(ay + r, ax + aw - 1, "│", b_attr)
+            in_h = max(0, ah - 1)
+            in_w = max(0, aw - 4)
+            art_rows: list[list[tuple[str, int, int]]] = []
+            if self.art_enabled and VIDEO_ID_RE.match(art_vid) and in_h >= 4 and in_w >= 12:
+                th = min(14, in_h)
+                tw = min(in_w, max(12, th * 2 + 2))
+                self.ensure_art_async(art_vid, tw, th)
+                with self.lock:
+                    art_rows = self.art_cache.get(f"{art_vid}:{tw}x{th}", [])
+            if art_rows and in_h > 0 and in_w > 0:
+                self.reset_art_pairs_for_vid(art_vid)
+                draw_rows = art_rows[:in_h]
+                art_w = min(in_w, max(len(r) for r in draw_rows))
+                sx = ax + 2 + max(0, (in_w - art_w) // 2)
+                sy = ay + 1 + max(0, (in_h - len(draw_rows)) // 2)
+                for ri, row_cells in enumerate(draw_rows):
+                    for ci, (ch, fg, bg) in enumerate(row_cells[:art_w]):
+                        try:
+                            self.stdscr.addstr(sy + ri, sx + ci, ch, curses.color_pair(self.get_art_pair(fg, bg)))
+                        except curses.error:
+                            pass
+            elif in_h > 0 and in_w > 0:
+                lbl = truncate_width("No Cover Art", in_w)
+                self.safe_addstr(ay + 1 + in_h // 2, ax + 2 + max(0, (in_w - display_width(lbl)) // 2), lbl, curses.color_pair(PAIR_DIM))
+            if lyrics_rect is None:
+                self.safe_addstr(ay + ah - 1, ax, "╰" + "─" * max(0, aw - 2) + "╯", b_attr)
+
+        if lyrics_rect is not None:
+            ly, lh, lx, lw = lyrics_rect
+            top_l = ("├" + "─" * max(0, lw - 2) + "┤") if art_rect is not None else ("╭" + "─" * max(0, lw - 2) + "╮")
+            self.safe_addstr(ly, lx, top_l, b_attr)
+            if lw > 12:
+                self.safe_addstr(ly, lx + 2, " Lyrics ", curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            body_h = max(1, lh - 2)
+            self.last_drawer_body_h = body_h
+            for r in range(body_h):
+                self.safe_addstr(ly + 1 + r, lx, "│", b_attr)
+                self.safe_addstr(ly + 1 + r, lx + lw - 1, "│", b_attr)
+            self.add_hitbox(lx + 1, ly + 1, lx + lw - 1, ly + lh - 1, "focus_pane", "drawer")
+            self._render_lyrics_body(ly + 1, body_h, lx, lw, b_attr)
+            self.safe_addstr(ly + lh - 1, lx, "╰" + "─" * max(0, lw - 2) + "╯", b_attr)
 
     def render_left_pane(self, y0: int, h: int, x0: int, w: int) -> None:
         focused = getattr(self, "focus_pane", "list") == "list"
@@ -1337,7 +1472,7 @@ class SovereignDashboard:
                     self.draw_button(y0, ax, "S Sync", "sync_pl", None)
         else:
             tab_title = dict(self.TABS).get(self.active_tab, self.active_tab.upper())
-            hdr = f" {tab_title} ({len(self.tracks)}) "
+            hdr = f" {tab_title} " if self.active_tab == "lyrics" else f" {tab_title} ({len(self.tracks)}) "
             self.safe_addstr(y0, x0 + 2, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
             if self.active_tab == "local":
                 lmode = getattr(self, "local_group_mode", "flat")
@@ -1350,30 +1485,68 @@ class SovereignDashboard:
                 if px + 9 < x0 + w - 1:
                     self.draw_button(y0, px, "S Sync", "sync_pl", None)
 
-        body_h = max(1, h - 2)
+        if self.active_tab == "lyrics" and not stack:
+            body_h = max(1, h - 2)
+            self.last_list_body_h = body_h
+            for row_i in range(body_h):
+                ry = y0 + 1 + row_i
+                self.safe_addstr(ry, x0, "│", border_attr)
+                self.safe_addstr(ry, x0 + w - 1, "│", border_attr)
+            self.add_hitbox(x0 + 1, y0 + 1, x0 + w - 1, y0 + h - 1, "focus_pane", "list")
+            self._render_lyrics_body(y0 + 1, body_h, x0, w, border_attr)
+            self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
+            return
+
+        is_group_list = bool(
+            self.tracks and self.tracks[0][3] in ("[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]", "[PL]", "[ART]")
+        )
+        use_4col = w >= 63 and h >= 6 and not is_group_list
+        inner_w = max(1, w - 2)
+        prefix_w = 6  # "▸ 1.* "
+
+        if use_4col:
+            col_w = max(12, inner_w - prefix_w - 1)
+            hdr_txt = " " * prefix_w + format_table_header(col_w)
+            self.safe_addstr(y0 + 1, x0, "│", border_attr)
+            self.safe_addstr(y0 + 1, x0 + 1, truncate_width(hdr_txt, inner_w), curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            self.safe_addstr(y0 + 1, x0 + w - 1, "│", border_attr)
+            self.safe_addstr(y0 + 2, x0, "├" + "─" * max(0, w - 2) + "┤", border_attr)
+            body_y = y0 + 3
+            body_h = max(1, h - 4)
+        else:
+            body_y = y0 + 1
+            body_h = max(1, h - 2)
+
         self.last_list_body_h = body_h
         if self.selected_idx < self.scroll_top:
             self.scroll_top = self.selected_idx
         elif self.selected_idx >= self.scroll_top + body_h:
             self.scroll_top = self.selected_idx - body_h + 1
 
+        self.add_hitbox(x0 + 1, body_y, x0 + w - 1, y0 + h - 1, "focus_pane", "list")
         for row_i in range(body_h):
-            ry = y0 + 1 + row_i
+            ry = body_y + row_i
             self.safe_addstr(ry, x0, "│", border_attr)
             self.safe_addstr(ry, x0 + w - 1, "│", border_attr)
             idx = self.scroll_top + row_i
-            inner_w = max(1, w - 2)
             if idx < len(self.tracks):
                 vid, title, meta, tag = self.tracks[idx]
                 is_sel = idx == self.selected_idx
                 marker = "▸" if is_sel else " "
                 fav_mark = "*" if vid in self.fav_ids else " "
                 prefix = f"{marker}{idx + 1:2d}.{fav_mark} "
-                tag_str = f" {tag}" if tag else ""
-                rem_w = max(4, inner_w - len(prefix) - len(tag_str) - 1)
-                text = format_track_row_columns(title, meta, rem_w)
-                pad = max(0, inner_w - len(prefix) - display_width(text) - len(tag_str))
-                line = f"{prefix}{text}{' ' * pad}{tag_str}"
+                if use_4col:
+                    art_s, ttl_s, alb_s, dur_s = parse_track_columns(title, meta, tag)
+                    col_w = max(12, inner_w - len(prefix) - 1)
+                    text = format_table_row_4col(art_s, ttl_s, alb_s, dur_s, col_w)
+                    pad = max(0, inner_w - len(prefix) - display_width(text))
+                    line = f"{prefix}{text}{' ' * pad}"
+                else:
+                    tag_str = f" {tag}" if tag else ""
+                    rem_w = max(4, inner_w - len(prefix) - len(tag_str) - 1)
+                    text = format_track_row_columns(title, meta, rem_w)
+                    pad = max(0, inner_w - len(prefix) - display_width(text) - len(tag_str))
+                    line = f"{prefix}{text}{' ' * pad}{tag_str}"
                 attr = curses.color_pair(PAIR_SEL if is_sel else PAIR_DEFAULT) | (curses.A_BOLD if is_sel else 0)
                 self.safe_addstr(ry, x0 + 1, line, attr)
                 if not is_sel and fav_mark == "*":
@@ -1381,12 +1554,12 @@ class SovereignDashboard:
                 self.add_hitbox(x0 + 1, ry, x0 + w - 1, ry + 1, "row", idx)
             else:
                 if row_i == 0 and not self.tracks:
-                    msg = " Searching..." if self.search_loading else " Empty. Press / or click Search above."
+                    msg = " Searching..." if getattr(self, "search_loading", False) else " Empty. Press / or click Search above."
                     self.safe_addstr(ry, x0 + 1, truncate_width(msg, inner_w), curses.color_pair(PAIR_DIM))
                 else:
                     self.safe_addstr(ry, x0 + 1, " " * inner_w, curses.color_pair(PAIR_DEFAULT))
-                self.add_hitbox(x0 + 1, ry, x0 + w - 1, ry + 1, "focus_pane", "list")
 
+        self._draw_scrollbar_col(x0 + w - 1, body_y, len(self.tracks), body_h, self.scroll_top, border_attr)
         self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
 
     def render_now_playing_card(self, y0: int, h: int, x0: int, w: int) -> None:
@@ -1735,28 +1908,111 @@ class SovereignDashboard:
                 self.safe_addstr(fy + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
             self.add_hitbox(bar_x, fy + 1, bar_x + bar_w, fy + 2, "seek_bar", (bar_x, bar_w, dur))
 
+    def render_overlay_modal(self, h: int, w: int, kind: str) -> None:
+        mw = min(max(36, w - 4), 76)
+        mh = min(max(8, h - 4), 18)
+        x0 = max(1, (w - mw) // 2)
+        y0 = max(1, (h - mh) // 2)
+        self.add_hitbox(0, 0, w, h, "close_modal", None)
+        self.add_hitbox(x0, y0, x0 + mw, y0 + mh, "noop", None)
+
+        b_attr = curses.color_pair(PAIR_CYAN) | curses.A_BOLD
+        self.safe_addstr(y0, x0, "╭" + "─" * max(0, mw - 2) + "╮", b_attr)
+        inner_w = max(1, mw - 2)
+        for row_i in range(1, mh - 1):
+            self.safe_addstr(y0 + row_i, x0, "│", b_attr)
+            self.safe_addstr(y0 + row_i, x0 + 1, " " * inner_w, curses.color_pair(PAIR_DEFAULT))
+            self.safe_addstr(y0 + row_i, x0 + mw - 1, "│", b_attr)
+        self.safe_addstr(y0 + mh - 1, x0, "╰" + "─" * max(0, mw - 2) + "╯", b_attr)
+
+        jobs = list(reversed(getattr(self, "dl_jobs", [])))
+        title_txt = f" DOWNLOADS ({len(jobs)}) " if kind == "downloads" else " TRACK INFO "
+        self.safe_addstr(y0, x0 + 2, truncate_width(title_txt, max(4, mw - 16)), b_attr)
+        if mw >= 20:
+            self.draw_button(y0, x0 + mw - 12, "Esc Close", "close_modal", None)
+
+        b_in_w = max(1, mw - 4)
+        b_in_h = max(1, mh - 2)
+        d_scroll = max(0, getattr(self, "drawer_scroll", 0))
+        if kind == "downloads":
+            if not jobs:
+                self.safe_addstr(y0 + 1, x0 + 2, truncate_width("No active or recent downloads. Press [d] on a track.", b_in_w), curses.color_pair(PAIR_DIM))
+                return
+            self.draw_button(y0 + 1, x0 + 2, "X Cancel All", "dl_cancel", None)
+            body_rows = max(1, b_in_h - 1)
+            start_j = min(max(0, len(jobs) - body_rows), d_scroll)
+            for ri in range(body_rows):
+                ji = start_j + ri
+                if ji >= len(jobs):
+                    break
+                j = jobs[ji]
+                st = str(j.get("status") or "running")
+                pct = int(j.get("pct") or 0)
+                badge = "[DONE]" if st == "done" else ("[SKIP]" if st == "skipped" else ("[ERR]" if st == "error" else f"[{pct:3d}%]"))
+                pair_j = PAIR_GREEN if st == "done" else (PAIR_DIM if st == "skipped" else (PAIR_RED if st == "error" else PAIR_CYAN))
+                line = truncate_width(f"{badge} {j.get('title') or ''} ({j.get('stage') or ''})", b_in_w)
+                self.safe_addstr(y0 + 2 + ri, x0 + 2, line, curses.color_pair(pair_j))
+            self._draw_scrollbar_col(x0 + mw - 1, y0 + 2, len(jobs), body_rows, start_j, b_attr)
+            return
+
+        if not self.tracks or not (0 <= self.selected_idx < len(self.tracks)):
+            self.safe_addstr(y0 + 1, x0 + 2, "No track selected", curses.color_pair(PAIR_DIM))
+            return
+        svid, stitle, smeta, stag = self.tracks[self.selected_idx]
+        cur_path = str(self.mpv_state.get("path") or "")
+        cur_vid = extract_video_id(cur_path) if cur_path else ""
+        idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
+        if not idle and svid and (svid == cur_vid or svid == cur_path):
+            mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+            sel_alb = format_album_line(mf["album"], mf["year"])
+        else:
+            sel_alb = extract_album_from_meta(smeta)
+        info_rows: list[tuple[str, int]] = [(f"Title: {stitle}", curses.color_pair(PAIR_TITLE) | curses.A_BOLD)]
+        if sel_alb:
+            info_rows.append((f"Album: {sel_alb}", curses.color_pair(PAIR_ICE)))
+        info_rows.append((f"Info : {smeta or '-'}", curses.color_pair(PAIR_ICE)))
+        info_rows.append((f"ID   : {svid} {stag}", curses.color_pair(PAIR_PURPLE)))
+        max_rows = max(1, b_in_h - 1)
+        drawn = 0
+        for txt, attr in info_rows[:max_rows]:
+            self.safe_addstr(y0 + 1 + drawn, x0 + 2, truncate_width(txt, b_in_w), attr)
+            drawn += 1
+        if b_in_h >= drawn + 1:
+            ax = x0 + 2
+            ay = y0 + 1 + drawn
+            for b_lbl, b_act in (("Ent Play", "play_sel"), ("a +Q", "add_sel"), ("r Radio", "radio_sel"), ("f Fav", "fav_sel"), ("d DL", "dl_sel")):
+                if ax + len(b_lbl) + 3 <= x0 + mw - 1:
+                    ax = self.draw_button(ay, ax, b_lbl, b_act)
+            if stag == "[Q]" and b_in_h >= drawn + 2:
+                qx = x0 + 2
+                qx = self.draw_button(ay + 1, qx, "K Up", "q_up")
+                self.draw_button(ay + 1, qx, "J Down", "q_down")
+
     def render_help_modal(self, h: int, w: int) -> None:
         lines = [
-            "MUSICCTL v2.4 - HYBRID MOUSE + KEYBOARD CONTROLS",
+            "MUSICCTL v2.4 - HYBRID RMPC KEYBOARD + MOUSE CONTROLS",
             "",
             "Mouse:",
             "  Click / Double / Right  Select / Play or Open / Enqueue track",
-            "  Click bars / tabs       Seek, Vol slider, Flags, Tabs & Focus",
-            "  Mouse wheel             Scroll list or drawer under cursor",
+            "  Header / Tabs / Footer  Play pill, Vol slider, Flags, Tabs, Seek bar",
+            "  Mouse wheel             Scroll list, Queue lyrics, drawer, or modal under cursor",
             "",
             "Layout & Navigation:",
-            "  h / l or Left / Right   Focus Left List / Right Drawer",
-            "  v / z                   Cycle Layout (auto/split/stacked/focus) / Hide Drawer",
-            "  1-8 / U Y I D / Tab     Switch tabs / Drawer tabs / Cycle (Shift-Tab rev)",
-            "  j/k PgUp/PgDn g/G       Move/page cursor in active focused pane",
-            "  / or Ctrl-S (Ctrl-U clr)Search tab & input | C Cat  T Type  L LocalGroup  Bksp Back",
+            "  1-8 / Tab / Shift-Tab   Switch tabs (1 Queue .. 8 Lyrics) / reverse",
+            "  h / l or Left / Right   Focus Left List / Queue Lyrics or Side Drawer",
+            "  j/k PgUp/PgDn C-U/D g/G Move, page, or jump cursor in focused pane/modal",
+            "  v / z                   Cycle Layout (auto/split/stacked/focus) / Toggle Side Pane",
+            "  D / I (Esc or q close)  Downloads / Track Info overlay modal (U/Y drawer)",
+            "  / or C-S (C-L clr)      Search tab & input | C Cat  T Type  L LocalGroup  Bksp Back",
             "",
             "Playback, Batch & Queue:",
-            "  Enter / a / f / r / d   Play or Jump / Enqueue / Fav / Radio / Download",
+            "  Space / p               Play / Pause",
+            "  < / >  or  b / n        Previous / Next track",
+            "  , / .  or  - / +        Volume -5% / +5%   |  [/] Seek -/+10s  |  s / x Stop",
+            "  Enter / a / f / r / d   Play or Open / Enqueue / Fav / Radio / Download",
             "  P / E / W / S / X       Play All / +Q All / DL All / Sync Pl / Cancel DL",
             "  J / K (on Queue tab)    Move selected queue track down / up",
-            "  Space  n/b  o  u  Q     Pause/Play | Next/Prev | Loop | Shuffle | Quality",
-            "  e EQ  N Norm  A Auto  m Mute | +/- Vol | [/] Seek | ? Help | q Quit",
+            "  o Loop  u Shuf  Q Qual  e EQ  N Norm  A Auto  m Mute  ? Help  q Quit",
         ]
         mw = min(w - 4, max(len(l) for l in lines) + 4)
         mh = min(h - 2, len(lines) + 2)
@@ -1781,16 +2037,17 @@ class SovereignDashboard:
             self.stdscr.refresh()
             return
 
-        show_search = self.active_tab == "search" or getattr(self, "search_focus", False)
+        show_search = self.active_tab == "search"
         layout = compute_rmpc_layout(
             h,
             w,
             getattr(self, "layout_mode", "auto"),
             getattr(self, "show_drawer", True),
             search_bar=show_search,
+            active_tab=self.active_tab,
         )
         self.last_layout = layout
-        if layout["drawer"] is None and getattr(self, "focus_pane", "list") == "drawer":
+        if layout["drawer"] is None and layout["lyrics"] is None and getattr(self, "focus_pane", "list") == "drawer":
             self.focus_pane = "list"
 
         self.render_rmpc_header(layout)
@@ -1799,11 +2056,15 @@ class SovereignDashboard:
             sy, _sh, _sx, sw = layout["search_bar"]
             self.render_search_bar(sy, sw)
 
+        if layout["art"] is not None or layout["lyrics"] is not None:
+            self.render_queue_art_lyrics_pane(layout["art"], layout["lyrics"])
         self.render_left_pane(*layout["list"])
         if layout["drawer"] is not None:
             self.render_drawer_card(*layout["drawer"])
 
         self.render_rmpc_footer(layout)
+        if getattr(self, "active_modal", "") in ("downloads", "info"):
+            self.render_overlay_modal(h, w, self.active_modal)
         if self.show_help:
             self.render_help_modal(h, w)
         self.stdscr.refresh()
@@ -1823,14 +2084,36 @@ class SovereignDashboard:
     def _collect_track_refs(self) -> list[str]:
         refs: list[str] = []
         for vid, _t, _m, tag in self.tracks:
-            if vid and tag not in ("[ALB]", "[ART]", "[PL]", "[L-ART]", "[L-ALB]"):
+            if vid and tag not in ("[ALB]", "[ART]", "[PL]", "[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]"):
                 refs.append(vid)
         return refs
+
+    def _ensure_lyrics_for_current(self) -> None:
+        title = str(self.mpv_state.get("media-title") or "")
+        cur_path = str(self.mpv_state.get("path") or "")
+        artist = extract_primary_artist(self.mpv_state.get("metadata"))
+        dur = float(self.mpv_state.get("duration") or 0.0)
+        if cur_path and cur_path != self.lyrics_track_key and not self.lyrics_loading:
+            if is_placeholder_title(title, extract_video_id(cur_path)):
+                self.lyrics_header = "Waiting for track metadata..."
+            else:
+                self.fetch_lyrics_async(title, cur_path, artist=artist, duration=dur)
+
+    def _maybe_requery_search(self) -> bool:
+        q = (getattr(self, "search_query", "") or "").strip()
+        if q and self.active_tab == "search":
+            self.trigger_search(q)
+            return True
+        return False
 
     def play_selected(self) -> None:
         if not self.tracks or self.selected_idx >= len(self.tracks):
             return
         vid, title, meta, tag = self.tracks[self.selected_idx]
+        if tag in ("[E-ART]", "[E-ALB]") or vid.startswith(("eart:", "ealb:")):
+            rows = getattr(self, "_entity_groups", {}).get(vid, [])
+            self.push_nav(title, rows, context_ref=vid, kind="entity_group")
+            return
         if tag in ("[L-ART]", "[L-ALB]"):
             rows = self._local_group_to_rows(vid)
             self.push_nav(title, rows, context_ref=vid, kind="local_group")
@@ -1857,6 +2140,11 @@ class SovereignDashboard:
         if not self.tracks or self.selected_idx >= len(self.tracks):
             return
         vid, title, meta, tag = self.tracks[self.selected_idx]
+        if tag in ("[E-ART]", "[E-ALB]") or vid.startswith(("eart:", "ealb:")):
+            refs = [r[0] for r in getattr(self, "_entity_groups", {}).get(vid, []) if r[0]]
+            if refs:
+                self.run_cli_batch_async([["add", r] for r in refs], toast=f"Queued {len(refs)} tracks", reload_after=True)
+            return
         if tag in ("[L-ART]", "[L-ALB]") or vid.startswith(("lart:", "lalb:")):
             paths = [str(e.get("path") or "") for e in getattr(self, "_local_groups", {}).get(vid, []) if e.get("path")]
             if paths:
@@ -1869,11 +2157,17 @@ class SovereignDashboard:
         self.run_cli_async(["_add_line", line], toast=f"Queued: {title[:24]}", reload_after=True)
 
     def handle_action(self, action: str, payload: Any, bstate: int = 0) -> None:
+        if action == "noop":
+            return
+        if action == "close_modal":
+            self.active_modal = ""
+            return
         if action == "close_help":
             self.show_help = False
             return
         if action == "tab":
             self.search_focus = False
+            self.active_modal = ""
             self.active_tab = payload
             self.nav_stack = []
             self.drill_title = ""
@@ -1884,14 +2178,17 @@ class SovereignDashboard:
             self.load_tab_items()
         elif action == "cycle_catalog":
             nxt = self.cycle_catalog()
-            self.set_toast(f"Catalog: {nxt}")
+            if not self._maybe_requery_search():
+                self.set_toast(f"Catalog: {nxt}")
         elif action == "cycle_search_type":
             nxt = self.cycle_search_type()
-            self.set_toast(f"Type: {nxt}")
+            if not self._maybe_requery_search():
+                self.set_toast(f"Type: {nxt}")
         elif action == "set_search_type":
             if payload in self.SEARCH_TYPES:
                 self.search_type = payload
-                self.set_toast(f"Type: {payload}")
+                if not self._maybe_requery_search():
+                    self.set_toast(f"Type: {payload}")
         elif action == "cycle_local_group":
             nxt = self.cycle_local_group()
             self.set_toast(f"Local view: {nxt}")
@@ -1900,7 +2197,7 @@ class SovereignDashboard:
         elif action == "play_all":
             ctx = getattr(self, "drill_ref", "")
             refs = self._collect_track_refs()
-            if ctx and not ctx.startswith(("lart:", "lalb:")):
+            if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")):
                 self.run_cli_async(["play", ctx], toast=f"Playing {self.drill_title[:20]}", reload_after=True)
             elif refs:
                 cmds = [["play", refs[0]], *(["add", r] for r in refs[1:])]
@@ -1908,14 +2205,14 @@ class SovereignDashboard:
         elif action == "add_all":
             ctx = getattr(self, "drill_ref", "")
             refs = self._collect_track_refs()
-            if ctx and not ctx.startswith(("lart:", "lalb:")):
+            if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")):
                 self.run_cli_async(["add", ctx], toast=f"Queued {self.drill_title[:20]}", reload_after=True)
             elif refs:
                 cmds = [["add", r] for r in refs]
                 self.run_cli_batch_async(cmds, toast=f"Queued {len(refs)} tracks", reload_after=True)
         elif action == "dl_all":
             ctx = getattr(self, "drill_ref", "")
-            if ctx and not ctx.startswith(("lart:", "lalb:")) and getattr(self, "dl_manager", None):
+            if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")) and getattr(self, "dl_manager", None):
                 self.dl_manager.start([ctx], label=self.drill_title or ctx)
                 self.right_tab = "downloads"
         elif action == "sync_pl":
@@ -1951,19 +2248,20 @@ class SovereignDashboard:
         elif action == "rtab":
             self.right_tab = payload
             self.drawer_scroll = 0
-            self.show_drawer = True
-            self.focus_pane = "drawer"
-            if payload == "lyrics":
-                title = str(self.mpv_state.get("media-title") or "")
-                cur_path = str(self.mpv_state.get("path") or "")
-                artist = extract_primary_artist(self.mpv_state.get("metadata"))
-                dur = float(self.mpv_state.get("duration") or 0.0)
-                if cur_path and cur_path != self.lyrics_track_key and not self.lyrics_loading:
-                    if is_placeholder_title(title, extract_video_id(cur_path)):
-                        self.lyrics_header = "Waiting for track metadata..."
-                    else:
-                        self.fetch_lyrics_async(title, cur_path, artist=artist, duration=dur)
+            if payload in ("downloads", "info") and getattr(self, "last_layout", {}).get("drawer") is None:
+                cur_m = getattr(self, "active_modal", "")
+                self.active_modal = "" if cur_m == payload else payload
+                if self.active_modal:
+                    self.focus_pane = "drawer"
+            else:
+                self.active_modal = ""
+                self.show_drawer = True
+                self.focus_pane = "drawer"
+                if payload == "lyrics":
+                    self._ensure_lyrics_for_current()
         elif action == "focus_search":
+            if self.active_tab != "search":
+                self.handle_action("tab", "search")
             self.search_focus = True
         elif action == "do_search":
             self.trigger_search(self.search_query)
@@ -2103,6 +2401,16 @@ class SovereignDashboard:
 
     def scroll_active_pane(self, delta: int, *, pane: str | None = None) -> None:
         target = pane or getattr(self, "focus_pane", "list")
+        if (target == "list" and self.active_tab == "lyrics" and not getattr(self, "nav_stack", None)) or (
+            target == "drawer" and getattr(self, "last_layout", {}).get("lyrics") is not None
+        ):
+            total = len(getattr(self, "lyrics_lines", []) or [])
+            bh_src = getattr(self, "last_list_body_h", 12) if target == "list" else getattr(self, "last_drawer_body_h", 8)
+            body_h = max(1, bh_src - 1)
+            max_sc = max(0, total - body_h)
+            cur_sc = getattr(self, "drawer_scroll", 0)
+            self.drawer_scroll = max(0, min(max_sc, cur_sc + delta))
+            return
         if target == "drawer":
             rtab = getattr(self, "right_tab", "upnext")
             total = self._drawer_content_len()
@@ -2147,6 +2455,60 @@ class SovereignDashboard:
             return True
 
         ch = ord(wch) if isinstance(wch, str) and len(wch) == 1 else wch
+
+        cur_modal = getattr(self, "active_modal", "")
+        if cur_modal in ("downloads", "info"):
+            if ch in (27, ord("q")):
+                self.active_modal = ""
+                return True
+            if ch == ord("?"):
+                self.active_modal = ""
+                self.show_help = True
+                return True
+            if ch == ord("D"):
+                self.handle_action("rtab", "downloads")
+                return True
+            if ch == ord("I"):
+                self.handle_action("rtab", "info")
+                return True
+            if ch == ord("U"):
+                self.active_modal = ""
+                self.handle_action("rtab", "upnext")
+                return True
+            if ch == ord("Y"):
+                self.active_modal = ""
+                self.handle_action("rtab", "lyrics")
+                return True
+            if ch in (ord("j"), curses.KEY_DOWN):
+                self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) + 1)
+                return True
+            if ch in (ord("k"), curses.KEY_UP):
+                self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) - 1)
+                return True
+            if ch in (curses.KEY_NPAGE, 4):
+                self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) + 6)
+                return True
+            if ch in (curses.KEY_PPAGE, 21):
+                self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) - 6)
+                return True
+            if ch in (ord("g"), curses.KEY_HOME):
+                self.drawer_scroll = 0
+                return True
+            if ch in (ord("G"), curses.KEY_END):
+                self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) + 50)
+                return True
+            if ch == ord("X") and cur_modal == "downloads":
+                self.handle_action("dl_cancel", None)
+                return True
+            if cur_modal == "info":
+                if ch in (10, 13, curses.KEY_ENTER):
+                    self.handle_action("play_sel", None)
+                    return True
+                for k_ch, m_act in ((ord("a"), "add_sel"), (ord("r"), "radio_sel"), (ord("f"), "fav_sel"), (ord("d"), "dl_sel")):
+                    if ch == k_ch:
+                        self.handle_action(m_act, None)
+                        return True
+            return True
 
         if ch in (ord("q"), 3):
             return False
@@ -2223,11 +2585,11 @@ class SovereignDashboard:
             self.handle_action("cycle_layout", None)
         elif ch == ord("z"):
             self.handle_action("toggle_drawer", None)
-        elif ch == ord(" "):
+        elif ch in (ord(" "), ord("p")):
             self.handle_action("toggle", None)
-        elif ch == ord("n"):
+        elif ch in (ord("n"), ord(">")):
             self.handle_action("next", None)
-        elif ch == ord("b"):
+        elif ch in (ord("b"), ord("<")):
             self.handle_action("prev", None)
         elif ch == ord("o"):
             self.handle_action("loop", None)
@@ -2243,11 +2605,11 @@ class SovereignDashboard:
             self.handle_action("autoplay", None)
         elif ch == ord("m"):
             self.handle_action("mute", None)
-        elif ch == ord("x"):
+        elif ch in (ord("x"), ord("s")):
             self.handle_action("stop", None)
-        elif ch in (ord("+"), ord("=")):
+        elif ch in (ord("+"), ord("="), ord(".")):
             self.handle_action("vol_delta", 5)
-        elif ch == ord("-"):
+        elif ch in (ord("-"), ord(",")):
             self.handle_action("vol_delta", -5)
         elif ch == ord("["):
             self.mpv.send(["seek", -10, "relative"])
@@ -2294,6 +2656,19 @@ class SovereignDashboard:
                 self.handle_action("tab", self.TABS[(cur_t - 1) % len(self.TABS)][0])
         return True
 
+    def handle_mouse_wheel(self, mx: int, my: int, delta: int) -> None:
+        if getattr(self, "active_modal", "") in ("downloads", "info"):
+            self.drawer_scroll = max(0, getattr(self, "drawer_scroll", 0) + delta)
+            return
+        layout = getattr(self, "last_layout", {}) or {}
+        dr = layout.get("drawer")
+        ly = layout.get("lyrics")
+        in_side = bool(
+            (dr and dr[2] <= mx < dr[2] + dr[3] and dr[0] <= my < dr[0] + dr[1])
+            or (ly and ly[2] <= mx < ly[2] + ly[3] and ly[0] <= my < ly[0] + ly[1])
+        )
+        self.scroll_active_pane(delta, pane="drawer" if in_side else "list")
+
     def run(self) -> None:
         self.init_colors()
         curses.curs_set(0)
@@ -2331,13 +2706,11 @@ class SovereignDashboard:
                 except curses.error:
                     continue
                 self._last_mx = mx
-                dr = getattr(self, "last_layout", {}).get("drawer")
-                in_drawer = bool(dr and dr[2] <= mx < dr[2] + dr[3] and dr[0] <= my < dr[0] + dr[1])
                 if bstate & curses.BUTTON4_PRESSED:
-                    self.scroll_active_pane(-3, pane="drawer" if in_drawer else "list")
+                    self.handle_mouse_wheel(mx, my, -3)
                     continue
                 if bstate & curses.BUTTON5_PRESSED:
-                    self.scroll_active_pane(3, pane="drawer" if in_drawer else "list")
+                    self.handle_mouse_wheel(mx, my, 3)
                     continue
                 for hb in reversed(self.hitboxes):
                     if hb.contains(mx, my):
