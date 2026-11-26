@@ -147,3 +147,68 @@
   2. Update `README.md` keybindings table and verify `make lint && make test-offline` exits `0`.
 - **Definition of Done (DoD)**:
   - `make lint && make test-offline` exits `0` with full unit coverage for WP3A-WP3C.
+
+---
+
+## 4. Planned Work Packet 4 (`v2.4.0`: `rmpc`-Inspired TUI Architecture, First-Class Entity Navigation & Hybrid Ergonomics)
+
+- **Track**: Track B / Spec-Driven Incremental Delivery (Zero-Bloat CLI & TUI)
+- **Status**: PLANNED [0/5 CHUNKS]
+- **Reference Blueprint**: User's `rmpc` layout & theme (`~/.config/rmpc/config.ron` + `~/.config/rmpc/theme.ron` on `foot` + `yambar`)
+- **Primary Problems Solved**:
+  1. Eliminate dead `[Songs|Albums|Artists|Lists]` search-scope pills leaking onto non-search tabs (previously mutating `self.search_type` with a toast only and zero view/search update).
+  2. Replace crowded 2-row 16-button footer & truncated single-line list with clean `rmpc`-style 3-box header, first-class entity tabs, 35/65 split `AlbumArt + Lyrics | 4-Column Table`, and minimal 1-row progress footer.
+  3. Keep `~/.local/bin/musicctl` and `~/.local/share/musicctl/` synced via `./install.sh` so runtime matches repo HEAD.
+
+### [ ] Chunk WP4A: `rmpc`-Style Frame, 3-Box Header, Tab Bar & Minimal Footer (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Replace the old top header + 2-row 16-button transport footer with `rmpc`-style chrome using rounded borders and clean box junctions (`┬`/`┴`/`├`/`┤`):
+     - **Header (4 rows, 3 boxes)**: Left (`[PLAY]`/`[PAUSE]` + `elapsed / duration (codec kHz)`), Center (`Title` + `Artist - Album`), Right (clickable volume slider `─●─ NN%` + compact toggleable state flags `[loop shuf eq norm auto]` + `[?]` help).
+     - **Navigation Tab Bar (2 rows)**: First-class tabs directly below header: `1 Queue | 2 Artists | 3 Albums | 4 Playlists | 5 Local | 6 Search | 7 History | 8 Lyrics` (clickable + `1-8`, `Tab`, `Shift-Tab`).
+     - **Footer (3 rows)**: Left mode pill (`NORMAL` / `SEARCH` / `DL`) + Right full-width clickable progress bar (`█`) with right-aligned border summary (`N songs / MM:SS total time`).
+  2. Enforce strict layout bounds clamping across `12x44` to `60x200` (zero overlap, graceful narrow/short fallback when `w < 80` or `h < 18`).
+- **Definition of Done (DoD)**:
+  - Layout matrix tests verify zero out-of-bounds or overlapping rects across all terminal sizes from `12x44` to `60x200`.
+
+### [ ] Chunk WP4B: 35/65 Split Queue View, 4-Column Track Table & Scrollbar (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. On `1 Queue` (when `w >= 88`): render `35%` left vertical split (`50% AlbumArt` + `50% Lyrics` with `├`/`┤` divider) and `65%` right pane (`3-row` table header `Artist (20%) | Title (35%) | Album (30%) | Duration (15%, right)` + full-height table body + vertical scrollbar `│ █ ▲ ▼`).
+  2. On entity tabs (`2 Artists`, `3 Albums`, `4 Playlists`, `5 Local`, `6 Search`, `7 History`, `8 Lyrics`): render clean `100%` full-width pane using aligned 4-column table formatting + scrollbar for track lists and clean drill-down breadcrumbs (`Bksp <-`).
+  3. Keep cover art lightweight & curses-safe (proportional centered `chafa` symbol preview, evaluating clean Sixel support only if curses redraw integrity is 100% preserved).
+- **Definition of Done (DoD)**:
+  - Pure table-column and scrollbar helpers pass unit tests across wide/narrow widths and wide Unicode/CJK strings without border clipping.
+
+### [ ] Chunk WP4C: First-Class Entity Tabs & Scoped Auto-Requery Search (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Isolate `[Cat:ytm|deezer|itunes]`, `[Songs] [Albums] [Artists] [Lists]`, and the search input bar strictly inside tab `6 Search` (pressing `/` switches to `6 Search` and focuses input).
+  2. Fix `set_search_type`, `cycle_search_type`, and `cycle_catalog` so changing scope or catalog with a non-empty `search_query` **immediately re-runs `search_async()`** instead of showing a no-op toast.
+  3. Wire real data into entity tabs:
+     - `2 Artists` & `3 Albums`: immediately aggregate & display grouped artists/albums from local library + history + favorites with `Enter` drill-down and `Bksp` back.
+     - `4 Playlists`: local named playlists with drill-down + `S` sync.
+     - `5 Local`: local library with `L` grouping toggle (`Flat`/`Artists`/`Albums`).
+     - `7 History`: merged Favorites (`[FAV]`) + History (`[HIS]`) feed.
+     - `8 Lyrics`: full-width synced lyrics view; expose Downloads manager (`DL`) & Track Info via dedicated toggle/modal (`D` / `I`) so main tabs stay uncluttered.
+- **Definition of Done (DoD)**:
+  - Clicking `Artists`/`Albums`/`Playlists` immediately populates grouped entities; changing scope/catalog on `6 Search` with an active query automatically triggers a fresh search request.
+
+### [ ] Chunk WP4D: Full Hybrid Keyboard + Mouse Parity & Hitbox Safety (`lib/tui.py`)
+- **Target Files**: `lib/tui.py`
+- **Steps**:
+  1. Keep every chrome element clickable (play/pause state pill, volume slider, state flags, tabs, table rows single/double/right-click, wheel scroll, progress seek bar, drill-down action pills) while pairing full `rmpc`/vim keyboard shortcuts (`1-8`, `Tab`/`S-Tab`, `h/j/k/l`, `PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `g`/`G`, `Space`/`p`, `<`/`>`, `f`/`b`, `,`/`.`, `z`/`x`/`o`/`v`, `/`, `Enter`, `a`, `d`, `r`, `K`/`J`, `P`/`E`/`W`/`X`, `D`, `I`, `?`).
+  2. Register container background focus hitboxes strictly BEFORE child interactive hitboxes across every pane so zero buttons/rows are shadowed.
+  3. Update `?` Help modal to reflect the unified `rmpc`-aligned hybrid keymap + mouse map.
+- **Definition of Done (DoD)**:
+  - Hitbox priority tests verify every clickable control in header, tabs, table, search bar, and footer resolves ahead of background focus hitboxes, and every mouse action has a tested keyboard trigger.
+
+### [ ] Chunk WP4E: Regression Tests, Docs, Local Install Sync & Optional Yambar Hook (`tests/test_tui.py`, `README.md`, `CHANGELOG.md`)
+- **Target Files**: `tests/test_tui.py`, `README.md`, `CHANGELOG.md`
+- **Steps**:
+  1. Update/add unit & regression tests in `tests/test_tui.py` covering the `rmpc`-style layout matrix, 4-column table + scrollbar, entity tab aggregation (`Artists`/`Albums`/`Playlists`), search auto-requery on scope/catalog change, and hitbox priority.
+  2. Update `README.md` ASCII preview and keybinding table; run `make lint && make test-offline`.
+  3. Run `./install.sh` so `~/.local/bin/musicctl` and `~/.local/share/musicctl/` are synced with repo HEAD (resolving stale installed `v2.2.0`).
+  4. *(Optional, requires user confirmation)*: Adapt `~/.config/yambar/mpris-bar.py` and `open-player.sh` if user wants `yambar` to track `musicctl` (`mpv-mpris`) alongside or instead of `ytm_player`.
+- **Definition of Done (DoD)**:
+  - `make lint && make test-offline` exits `0` with full WP4 coverage and `~/.local/bin/musicctl --version` matches repo version.
