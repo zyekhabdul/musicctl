@@ -935,6 +935,14 @@ chmod +x "$STUB_FZF_DIR/fzf"
 FZF_WARN_OUT="$(PATH="$STUB_FZF_DIR:$PATH" "$BIN" fzf 2>&1 || true)"
 assert_contains "musicctl fzf emits deprecation warning" "$FZF_WARN_OUT" "deprecated"
 
+# WP5A: soxr capability cache + catalog SSOT _parse_ytm multi-artist
+rm -f "$MUSICCTL_CACHE_DIR/soxr.cap"
+"$BIN" _mpv_audiophile_args >/dev/null
+assert_ok "mpv_supports_soxr writes capability cache file" test -s "$MUSICCTL_CACHE_DIR/soxr.cap"
+MULTI_ART_FIXTURE='{"contents":{"musicShelfRenderer":{"contents":[{"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"multi123456"},"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Titanium"}]}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"David Guetta"},{"text":" & "},{"text":"Sia"},{"text":" • "},{"text":"Nothing But the Beat"},{"text":" • "},{"text":"4:05"}]}}}]}}]}}}'
+MULTI_PARSED="$(printf '%s' "$MULTI_ART_FIXTURE" | "$BIN" _parse_ytm)"
+assert_contains "_parse_ytm SSOT preserves multi-artist and album" "$MULTI_PARSED" $'multi123456\tTitanium\tDavid Guetta & Sia • Nothing But the Beat • 4:05'
+
 # 14. Live network smoke tests (skipped if MUSICCTL_OFFLINE_TESTS=1)
 if [[ "$OFFLINE" != "1" ]]; then
   SEARCH_OUT="$("$BIN" search "pamungkas to the bone")"

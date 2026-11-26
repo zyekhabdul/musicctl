@@ -1111,6 +1111,15 @@ class TestProvidersAndDownloader(unittest.TestCase):
             )
             self.assertTrue(p3.is_relative_to(dl_dir.resolve()))
 
+            p4 = downloader_mod.render_dest_path(
+                dl_dir,
+                "{title.__class__}/{artist[0]} - {title!r}",
+                {"artist": "Pamungkas", "album": "Walk the Talk", "track_num": 1, "title": "To the Bone", "id": "safe1"},
+                "flac",
+            )
+            self.assertEqual(p4, (dl_dir / "To the Bone.flac").resolve())
+            self.assertNotIn("class", str(p4))
+
     def test_prepare_square_cover_crops_to_1_to_1(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -2278,6 +2287,29 @@ class TestHardening(unittest.TestCase):
             )
         self.assertEqual(cnt, 2)
         mock_send.assert_called_once_with(["seek", 42.5, "absolute"])
+
+        # Race recovery: playlist-pos reset to 0 after async loadfile -> re-sends target_pos before seek
+        race_states = iter([
+            {"idle-active": False, "playlist-pos": 0, "playlist-count": 2, "duration": 10.0, "seekable": True},
+            {"idle-active": False, "playlist-pos": 1, "playlist-count": 2, "duration": 180.0, "seekable": True},
+        ])
+        with (
+            mock.patch.object(client, "batch_send", return_value=(10, 10)),
+            mock.patch.object(client, "batch_get", side_effect=lambda _props: next(race_states)),
+            mock.patch.object(client, "send", return_value=True) as mock_race_send,
+        ):
+            cnt_race = client.resume_session(
+                {"playlist": ["a.flac", "b.flac"], "playlist_pos": 1, "time_pos": 42.5},
+                timeout=2.0,
+            )
+        self.assertEqual(cnt_race, 2)
+        self.assertEqual(
+            mock_race_send.call_args_list,
+            [
+                mock.call(["set_property", "playlist-pos", 1]),
+                mock.call(["seek", 42.5, "absolute"]),
+            ],
+        )
 
         with tempfile.TemporaryDirectory(prefix="musicctl-resume-") as tmp:
             sock = os.path.join(tmp, "mpv.sock")
@@ -3557,6 +3589,44 @@ class TestUXClarityPolish(unittest.TestCase):
             text=True,
         )
         self.assertEqual(cli_out.splitlines(), ["", "", "241"])
+
+    def test_wp5a_queue_sig_ssot_exts_and_duration_formatters(self):
+        runtime_common = sys.modules["common"]
+        self.assertIs(runtime_common.AUDIO_EXTS, library_mod.AUDIO_EXTS)
+        self.assertIs(library_mod.AUDIO_EXTS, downloader_mod.AUDIO_EXTS)
+        self.assertEqual(common_mod.AUDIO_EXTS, library_mod.AUDIO_EXTS)
+        self.assertEqual(common_mod.format_mmss(345), "05:45")
+        self.assertEqual(common_mod.format_mmss(345, pad_minutes=False), "5:45")
+        self.assertEqual(catalog.format_duration_mmss(345), "5:45")
+        self.assertEqual(catalog.format_duration_mmss(0), "")
+        self.assertEqual(library_mod.format_duration(345), "5:45")
+        self.assertEqual(library_mod.format_duration(3661), "1:01:01")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            d = tui.SovereignDashboard(
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.mpv_state = {
+                "playlist": [{"filename": "a.opus", "title": "Song A", "current": True}],
+                "metadata": {"artist": "Artist A", "album": "Album A"},
+                "duration": 200.0,
+            }
+            d.active_tab = "queue"
+            d.load_tab_items()
+            sig1 = d._queue_state_sig()
+            self.assertEqual(sig1, d._last_queue_sig)
+
+            d.mpv_state["time-pos"] = 45.0
+            self.assertEqual(d._queue_state_sig(), sig1)
+
+            d.mpv_state["playlist"].append({"filename": "b.opus", "title": "Song B", "current": False})
+            self.assertNotEqual(d._queue_state_sig(), sig1)
 
 
 if __name__ == "__main__":
