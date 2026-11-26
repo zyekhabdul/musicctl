@@ -153,7 +153,7 @@
 ## 4. Planned Work Packet 4 (`v2.4.0`: `rmpc`-Inspired TUI Architecture, First-Class Entity Navigation & Hybrid Ergonomics)
 
 - **Track**: Track B / Spec-Driven Incremental Delivery (Zero-Bloat CLI & TUI)
-- **Status**: IN PROGRESS [1/5 CHUNKS]
+- **Status**: COMPLETED [5/5 CHUNKS]
 - **Reference Blueprint**: User's `rmpc` layout & theme (`~/.config/rmpc/config.ron` + `~/.config/rmpc/theme.ron` on `foot` + `yambar`)
 - **Primary Problems Solved**:
   1. Eliminate dead `[Songs|Albums|Artists|Lists]` search-scope pills leaking onto non-search tabs (previously mutating `self.search_type` with a toast only and zero view/search update).
@@ -171,7 +171,7 @@
 - **Definition of Done (DoD)**:
   - Layout matrix tests verify zero out-of-bounds or overlapping rects across all terminal sizes from `12x44` to `60x200`.
 
-### [ ] Chunk WP4B: 35/65 Split Queue View, 4-Column Track Table & Scrollbar (`lib/tui.py`)
+### [x] Chunk WP4B: 35/65 Split Queue View, 4-Column Track Table & Scrollbar (`lib/tui_widgets.py`, `lib/tui.py`)
 - **Target Files**: `lib/tui.py`
 - **Steps**:
   1. On `1 Queue` (when `w >= 88`): render `35%` left vertical split (`50% AlbumArt` + `50% Lyrics` with `├`/`┤` divider) and `65%` right pane (`3-row` table header `Artist (20%) | Title (35%) | Album (30%) | Duration (15%, right)` + full-height table body + vertical scrollbar `│ █ ▲ ▼`).
@@ -180,7 +180,7 @@
 - **Definition of Done (DoD)**:
   - Pure table-column and scrollbar helpers pass unit tests across wide/narrow widths and wide Unicode/CJK strings without border clipping.
 
-### [ ] Chunk WP4C: First-Class Entity Tabs & Scoped Auto-Requery Search (`lib/tui.py`)
+### [x] Chunk WP4C: First-Class Entity Tabs & Scoped Auto-Requery Search (`lib/tui_widgets.py`, `lib/tui.py`)
 - **Target Files**: `lib/tui.py`
 - **Steps**:
   1. Isolate `[Cat:ytm|deezer|itunes]`, `[Songs] [Albums] [Artists] [Lists]`, and the search input bar strictly inside tab `6 Search` (pressing `/` switches to `6 Search` and focuses input).
@@ -194,7 +194,7 @@
 - **Definition of Done (DoD)**:
   - Clicking `Artists`/`Albums`/`Playlists` immediately populates grouped entities; changing scope/catalog on `6 Search` with an active query automatically triggers a fresh search request.
 
-### [ ] Chunk WP4D: Full Hybrid Keyboard + Mouse Parity & Hitbox Safety (`lib/tui.py`)
+### [x] Chunk WP4D: Full Hybrid Keyboard + Mouse Parity & Hitbox Safety (`lib/tui.py`)
 - **Target Files**: `lib/tui.py`
 - **Steps**:
   1. Keep every chrome element clickable (play/pause state pill, volume slider, state flags, tabs, table rows single/double/right-click, wheel scroll, progress seek bar, drill-down action pills) while pairing full `rmpc`/vim keyboard shortcuts (`1-8`, `Tab`/`S-Tab`, `h/j/k/l`, `PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `g`/`G`, `Space`/`p`, `<`/`>`, `f`/`b`, `,`/`.`, `z`/`x`/`o`/`v`, `/`, `Enter`, `a`, `d`, `r`, `K`/`J`, `P`/`E`/`W`/`X`, `D`, `I`, `?`).
@@ -203,7 +203,7 @@
 - **Definition of Done (DoD)**:
   - Hitbox priority tests verify every clickable control in header, tabs, table, search bar, and footer resolves ahead of background focus hitboxes, and every mouse action has a tested keyboard trigger.
 
-### [ ] Chunk WP4E: Regression Tests, Docs, Local Install Sync & Optional Yambar Hook (`tests/test_tui.py`, `README.md`, `CHANGELOG.md`)
+### [x] Chunk WP4E: Regression Tests, Docs, Local Install Sync & Optional Yambar Hook (`tests/test_tui.py`, `README.md`, `CHANGELOG.md`)
 - **Target Files**: `tests/test_tui.py`, `README.md`, `CHANGELOG.md`
 - **Steps**:
   1. Update/add unit & regression tests in `tests/test_tui.py` covering the `rmpc`-style layout matrix, 4-column table + scrollbar, entity tab aggregation (`Artists`/`Albums`/`Playlists`), search auto-requery on scope/catalog change, and hitbox priority.

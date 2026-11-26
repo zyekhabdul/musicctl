@@ -4,21 +4,23 @@ Lightweight, standalone YouTube Music CLI & TUI player modeled after `gamectl`.
 Streams ad-free audio via InnerTube (`WEB_REMIX`) + `yt-dlp` + background `mpv` IPC daemon + **clickable realtime Sovereign Dashboard** (~20-30 MB RAM, zero Electron).
 
 ```text
- MUSICCTL v2.3   1 Home  2 Search  3 Queue  4 Favs  5 Hist  6 Local  7 Pl  [PLAY] OPUS 48kHz
- [Cat:ytm] [Songs] [Albums] [Artists] [Lists] [ pamungkas to the bone ] [Search] [Clear]
-╭─ 1 Home (12) ─────────────────────────╮╭─ NOW PLAYING ──────────────────────────────────────╮
-│▸ 1.* To the Bone — Pamungkas    [FAV] ││ [ART]  To the Bone                                │
-│  2.  Monolog — Pamungkas        [HIS] ││        Audio: opus 48kHz  |  Queue: 1/12           │
-│  3.  One Only — Pamungkas       [HIS] ││        EQ: flat  |  Norm: off  |  Loop: off       │
-│                                       ││        ▂▅▇▃▆▄▂▅▇▆▃▂▅▇▄▃▆▂▅▇                        │
-│                                       │╰────────────────────────────────────────────────────╯
-│                                       │╭─ [Up Next] [Lyrics] [Info] ────────────────────────╮
-│                                       ││▸  1. To the Bone                                   │
-│                                       ││   2. Monolog                                       │
-╰───────────────────────────────────────╯╰────────────────────────────────────────────────────╯
- 02:14  ━━━━━━━━━━●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  05:45
- [|< Prev] [|| Pause] [>| Next] [[] Stop] [~ Radio] [* Fav]   Vol [-] ████████░░  80% [+]
- [Loop:off] [Shuf] [EQ:flat] [Norm:off] [Mute] [? Help]
+╭──────────────────────┬────────────────────────────────────┬──────────────────────╮
+│ [PLAY]               │            To the Bone             │ ─────────●──  80%    │
+│ 02:14 / 05:45 (opus) │    Pamungkas - Walk the Talk       │ o u e N A m      [?] │
+├──────────────────────┴────────────────────────────────────┴──────────────────────┤
+│ 1 Queue   2 Artists   3 Albums   4 Playlists   5 Local   6 Search   7 Hist  8 Lyr│
+╰──────────────────────────────────────────────────────────────────────────────────╯
+╭─ Album Art ──────────────╮╭─ Queue (12) ─────────────────────────────────────────╮
+│                          ││        Artist       Title        Album       Duration│
+│      [chafa preview]     │├──────────────────────────────────────────────────────┤
+│                          ││▸ 1.* Pamungkas    To the Bone  Walk the..     05:45 █│
+├─ Lyrics ─────────────────┤│  2.  Pamungkas    Monolog      Walk the..     03:30 ││
+│ [LRCLIB] To the Bone     ││  3.  NIKI         Lowkey       NIKI           02:51 ││
+│ ▸ Cause it took me so..  ││                                                     ▼│
+╰──────────────────────────╯╰──────────────────────────────────────────────────────╯
+╭────────┬───────────────────────────────────────────────── 12 songs / 42:10 total ╮
+│ NORMAL │ ██████████████████───────────────────────────────────────────────────── │
+╰────────┴─────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Quick Install
@@ -93,20 +95,21 @@ musicctl stop                   # Save session and stop background mpv daemon
 
 | Control | Action |
 | --- | --- |
-| Click / Double-click / Right-click row | Select / Play or Jump / Enqueue track |
-| Click progress / volume bar, Wheel | Seek timestamp / Set volume / Scroll list or drawer under cursor |
-| `/` or `Ctrl-S` (`Ctrl-U` clear, `Esc` leave) | Focus search input (`Ctrl-L` clear outside input) |
-| `h` / `l` or `Left` / `Right` | Focus Left List / Right Drawer |
-| `v` / `z` | Cycle adaptive layout (`auto`/`split`/`stacked`/`focus`) / Toggle drawer |
-| `1`-`7` / `U` `Y` `I` `D` / `Tab` (`Shift-Tab`) | Switch left tabs / Jump to drawer tab / Cycle drawer tabs |
-| `C` / `T` / `L` / `Backspace` | Cycle catalog / search type / local grouping (`Flat`/`Artists`/`Albums`) / Back |
-| `j`/`k` (`PgUp`/`PgDn`, `g`/`G`) | Move or page cursor in active focused pane |
-| `J` / `K` (on Queue tab) | Move selected queue track down / up |
-| `Enter` / `a` / `f` / `r` / `d` | Play or Jump / Enqueue / Toggle fav / Queue radio / Non-blocking download |
+| Click / Double-click / Right-click row | Select / Play or Open / Enqueue track |
+| Click Header / Tabs / Footer / Wheel | Play pill, Vol slider, Flags, Tabs, Seek bar / Scroll list, Queue lyrics, drawer, or modal under cursor |
+| `1`-`8` / `Tab` / `Shift-Tab` | Switch first-class tabs (`1 Queue`, `2 Artists`, `3 Albums`, `4 Playlists`, `5 Local`, `6 Search`, `7 Hist`, `8 Lyrics`) / reverse |
+| `/` or `Ctrl-S` (`Ctrl-U` clear, `Esc` leave) | Jump to `6 Search` & focus query (`Ctrl-L` clear outside input) |
+| `C` / `T` / `L` / `Backspace` | Cycle catalog (`ytm`/`deezer`/`itunes`), search scope (auto-requery on active query), `5 Local` grouping / Back |
+| `h` / `l` or `Left` / `Right` | Focus Left Table / Queue Lyrics or Side Drawer |
+| `j`/`k` (`PgUp`/`PgDn`, `Ctrl-U`/`Ctrl-D`, `g`/`G`) | Move, page, or jump cursor in focused pane or active modal |
+| `v` / `z` | Cycle layout (`auto`/`split`/`stacked`/`focus`) / Toggle side pane |
+| `D` / `I` (`U` / `Y` drawer, `Esc` / `q` close) | Toggle Downloads / Track Info overlay modal (or drawer tab) |
+| `J` / `K` (on `1 Queue`) | Move selected queue track down / up |
+| `Enter` / `a` / `f` / `r` / `d` | Play or Open / Enqueue / Toggle fav / Queue radio / Non-blocking download |
 | `P` / `E` / `W` / `S` / `X` | Play All / +Queue All / Download All / Sync playlist / Cancel downloads |
-| `Space` / `n` / `b` / `x` | Pause or Play / Next / Prev / Stop daemon |
+| `Space` or `p` / `>` or `n` / `<` or `b` / `s` or `x` | Pause or Play / Next / Prev / Stop daemon |
 | `o` / `u` / `Q` / `e` / `N` / `A` / `m` | Cycle loop / Shuffle / Cycle quality / Cycle EQ / Toggle norm / Autoplay / Mute |
-| `+` or `=` / `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |
+| `.` or `+` / `,` or `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |
 | `?` / `q` | Toggle help modal / Quit TUI (daemon stays alive) |
 
 ### Legacy fzf Cockpit (`musicctl fzf`)

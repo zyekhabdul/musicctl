@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.4.0 (2026-11-26)
+
+- **Modular TUI Widget Architecture & FHS Alignment (`lib/tui_widgets.py`, `bin/musicctl`, `install.sh`, `Makefile`, `packaging/arch/PKGBUILD`)**: Extracted pure layout, table formatting, scrollbar, entity aggregation, and widget helpers into `lib/tui_widgets.py`, moved installed Python/Lua runtime modules to FHS `lib/musicctl/`, and removed duplicate packaging noise.
+- **`rmpc`-Inspired TUI Chrome (`lib/tui_widgets.py`, `lib/tui.py`)**: Replaced the multi-row button footer with a 4-row 3-box status/title/volume+flags header, a 2-row 8-tab navigation bar (`1 Queue .. 8 Lyrics`), and a 3-row mode+seekbar footer with right-aligned queue duration summary and strict `12x44..60x200` bounds clamping.
+- **35/65 Queue Split & 4-Column Track Table (`lib/tui_widgets.py`, `lib/tui.py`)**: Added 35/65 Queue split (`Album Art` + scrollable `Lyrics` on the left, 4-column `Artist | Title | Album | Duration` table + vertical scrollbar `│ █ ▲ ▼` on the right on `w >= 88`) and full-width views across entity tabs.
+- **First-Class Entity Tabs, Scoped Search & Overlay Modals (`lib/tui_widgets.py`, `lib/tui.py`)**: Added aggregated `2 Artists` and `3 Albums` browsing with drill-down, merged `7 History` (`[FAV]` + `[HIS]`), isolated the search bar strictly to `6 Search` with instant auto-requery on catalog/scope changes, and exposed `D` (Downloads) / `I` (Track Info) overlay modals.
+- **Hybrid `rmpc` + Vim + Mouse Parity & Hardening (`lib/tui.py`, `lib/downloader.py`, `lib/common.py`, `lib/providers.py`, `bin/musicctl`)**: Added `rmpc` aliases (`p`, `</>`, `,/.`, `s`), modal paging (`PgUp`/`PgDn`/`Ctrl-U`/`Ctrl-D`/`g`/`G`), cursor-aware mouse wheel routing (`handle_mouse_wheel`), background-before-child hitbox audit, updated `?` help modal, `fcntl.flock` atomic locking for `download-archive.tsv`/`dl-jobs.json`/`sync-state.json`, readiness-polled `MpvClient.resume_session`, single-process `providers.py resolve-batch`, and `shlex` `MUSICCTL_MPV_EXTRA_ARGS` parsing.
+
 ## v2.3.0 (2026-11-25)
 
 - **Adaptive Full-Space TUI Layout (`lib/tui.py`)**: Replaced fixed 52/48 split with aspect-aware layout engine (`auto`, `split`, `stacked`, `focus`) via `v` cycling and `z` drawer toggle, safe short-terminal bounds clamping, and aligned two-column `Title | Meta` list rows on wide panes.
