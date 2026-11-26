@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import gc
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ import unittest
 from unittest import mock
 import urllib.error
 import urllib.request
+import warnings
 import wave
 from pathlib import Path
 
@@ -1847,8 +1849,12 @@ class TestP1Consolidation(unittest.TestCase):
                 }]))
             raise AssertionError(f"Unexpected URL: {req.full_url}")
 
-        with mock.patch.object(urllib.request, "urlopen", side_effect=fake_open_search):
-            res2 = common_mod.fetch_lyrics("Demo", artist="Artist", duration=120)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            with mock.patch.object(urllib.request, "urlopen", side_effect=fake_open_search):
+                res2 = common_mod.fetch_lyrics("Demo", artist="Artist", duration=120)
+            gc.collect()
+        self.assertEqual([w for w in caught if issubclass(w.category, ResourceWarning)], [])
         self.assertIsNotNone(res2)
         assert res2 is not None
         self.assertEqual(res2["plain_text"], "Plain body")
@@ -1873,6 +1879,30 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertEqual(res3["plain_text"], "Fallback line")
         self.assertIn("[Fallback]", common_mod.format_lyrics_plain(res3))
         self.assertTrue(all(ua == "musicctl/2.3" for ua in seen_ua))
+
+    def test_common_split_shell_args_and_cli(self):
+        self.assertEqual(common_mod.split_shell_args(""), [])
+        self.assertEqual(common_mod.split_shell_args("   "), [])
+        self.assertEqual(
+            common_mod.split_shell_args('--audio-device="pipewire/My Speaker" --title=\'Hi There\''),
+            ["--audio-device=pipewire/My Speaker", "--title=Hi There"],
+        )
+        # Shell substitution syntax stays literal (no shell eval)
+        self.assertEqual(
+            common_mod.split_shell_args('--title="$(touch /tmp/nope)" --ao=null'),
+            ["--title=$(touch /tmp/nope)", "--ao=null"],
+        )
+        # Unbalanced quotes fall back cleanly without crashing
+        self.assertEqual(
+            common_mod.split_shell_args("--ao=null --title='unclosed"),
+            ["--ao=null", "--title='unclosed"],
+        )
+        proc = subprocess.run(
+            [sys.executable, str(COMMON_PATH), "split-args", '--ao=null --title="Space Value"'],
+            capture_output=True,
+            check=True,
+        )
+        self.assertEqual(proc.stdout, b"--ao=null\x00--title=Space Value\x00")
 
     def test_mpv_client_batch_loadfile_and_resume_live_isolated(self):
         with tempfile.TemporaryDirectory(prefix="musicctl-p1-") as tmp:
@@ -1926,7 +1956,7 @@ class TestP1Consolidation(unittest.TestCase):
                 snap = None
                 for _ in range(30):
                     s_get = client.batch_get(["playlist-count", "media-title", "idle-active"])
-                    if s_get and s_get.get("idle-active") is False and s_get.get("playlist-count") == 2:
+                    if s_get and s_get.get("idle-active") is False and s_get.get("playlist-count") == 2 and s_get.get("media-title"):
                         snap = s_get
                         break
                     time.sleep(0.1)

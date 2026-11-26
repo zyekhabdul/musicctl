@@ -213,6 +213,14 @@ STOP_OUT="$("$BIN" stop)"
 assert_contains "daemon stop" "$STOP_OUT" "Daemon stopped"
 assert_ok "daemon socket cleaned up" test ! -S "$MUSICCTL_SOCKET"
 
+# 9b. Quoted MUSICCTL_MPV_EXTRA_ARGS preserves spaces via shlex split
+EXTRA_VOL="$(MUSICCTL_MPV_EXTRA_ARGS='--ao=null --title="Musicctl Space Test"' "$BIN" vol 70)"
+assert_contains "daemon starts with quoted extra args" "$EXTRA_VOL" "Volume: 70%"
+EXTRA_TITLE="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import common; print((common.MpvClient(sys.argv[2]).batch_get(["title"]) or {}).get("title", ""))' "$ROOT_DIR/lib" "$MUSICCTL_SOCKET")"
+assert_contains "quoted extra arg title preserved" "$EXTRA_TITLE" "Musicctl Space Test"
+"$BIN" stop >/dev/null
+assert_ok "daemon socket cleaned up after extra args test" test ! -S "$MUSICCTL_SOCKET"
+
 # 10. Version, doctor, config precedence, synced lyrics JSON, and auto-cache resolution
 VER_OUT="$("$BIN" --version)"
 assert_contains "version prints 2.3.0" "$VER_OUT" "musicctl 2.3.0"
@@ -289,27 +297,34 @@ if command -v desktop-file-validate >/dev/null 2>&1; then
   assert_ok "desktop-file-validate musicctl.desktop" desktop-file-validate "$ROOT_DIR/musicctl.desktop"
 fi
 PREFIX_TMP="$TMP_DIR/prefix"
+mkdir -p "$PREFIX_TMP/share/musicctl/__pycache__"
+printf 'legacy\n' >"$PREFIX_TMP/share/musicctl/common.py"
+printf 'user-fav\n' >"$PREFIX_TMP/share/musicctl/favorites.tsv"
 assert_ok "install.sh dry install" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" >/dev/null
 assert_ok "installed bin exists" test -x "$PREFIX_TMP/bin/musicctl"
-assert_ok "installed common.py exists" test -f "$PREFIX_TMP/share/musicctl/common.py"
-assert_ok "installed catalog.py exists" test -f "$PREFIX_TMP/share/musicctl/catalog.py"
-assert_ok "installed providers.py exists" test -f "$PREFIX_TMP/share/musicctl/providers.py"
-assert_ok "installed downloader.py exists" test -f "$PREFIX_TMP/share/musicctl/downloader.py"
-assert_ok "installed library.py exists" test -f "$PREFIX_TMP/share/musicctl/library.py"
-assert_ok "installed tui.py exists" test -f "$PREFIX_TMP/share/musicctl/tui.py"
-assert_ok "installed mpv_hooks.lua exists" test -f "$PREFIX_TMP/share/musicctl/mpv_hooks.lua"
+assert_ok "installed common.py exists" test -f "$PREFIX_TMP/lib/musicctl/common.py"
+assert_ok "installed catalog.py exists" test -f "$PREFIX_TMP/lib/musicctl/catalog.py"
+assert_ok "installed providers.py exists" test -f "$PREFIX_TMP/lib/musicctl/providers.py"
+assert_ok "installed downloader.py exists" test -f "$PREFIX_TMP/lib/musicctl/downloader.py"
+assert_ok "installed library.py exists" test -f "$PREFIX_TMP/lib/musicctl/library.py"
+assert_ok "installed tui.py exists" test -f "$PREFIX_TMP/lib/musicctl/tui.py"
+assert_ok "installed mpv_hooks.lua exists" test -f "$PREFIX_TMP/lib/musicctl/mpv_hooks.lua"
+assert_ok "legacy share common.py migrated away" test ! -e "$PREFIX_TMP/share/musicctl/common.py"
+assert_ok "legacy share __pycache__ migrated away" test ! -e "$PREFIX_TMP/share/musicctl/__pycache__"
+assert_ok "user favorites.tsv preserved during install" test -f "$PREFIX_TMP/share/musicctl/favorites.tsv"
 assert_ok "installed desktop exists" test -f "$PREFIX_TMP/share/applications/musicctl.desktop"
 PREFIX_STATUS="$("$PREFIX_TMP/bin/musicctl" status --json)"
 assert_ok "installed prefix status json valid" jq -e '.state == "idle"' <<<"$PREFIX_STATUS" >/dev/null
 assert_ok "install.sh uninstall" "$ROOT_DIR/install.sh" --prefix "$PREFIX_TMP" --uninstall >/dev/null
 assert_ok "installed bin removed" test ! -e "$PREFIX_TMP/bin/musicctl"
-assert_ok "installed common.py removed" test ! -e "$PREFIX_TMP/share/musicctl/common.py"
-assert_ok "installed catalog.py removed" test ! -e "$PREFIX_TMP/share/musicctl/catalog.py"
-assert_ok "installed providers.py removed" test ! -e "$PREFIX_TMP/share/musicctl/providers.py"
-assert_ok "installed downloader.py removed" test ! -e "$PREFIX_TMP/share/musicctl/downloader.py"
-assert_ok "installed library.py removed" test ! -e "$PREFIX_TMP/share/musicctl/library.py"
-assert_ok "installed tui.py removed" test ! -e "$PREFIX_TMP/share/musicctl/tui.py"
-assert_ok "installed mpv_hooks.lua removed" test ! -e "$PREFIX_TMP/share/musicctl/mpv_hooks.lua"
+assert_ok "installed common.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/common.py"
+assert_ok "installed catalog.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/catalog.py"
+assert_ok "installed providers.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/providers.py"
+assert_ok "installed downloader.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/downloader.py"
+assert_ok "installed library.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/library.py"
+assert_ok "installed tui.py removed" test ! -e "$PREFIX_TMP/lib/musicctl/tui.py"
+assert_ok "installed mpv_hooks.lua removed" test ! -e "$PREFIX_TMP/lib/musicctl/mpv_hooks.lua"
+assert_ok "user favorites.tsv preserved after uninstall" test -f "$PREFIX_TMP/share/musicctl/favorites.tsv"
 
 # 12b. Pure-Bash format_mmss and ascii_bar boundary checks
 assert_contains "format_mmss 0 -> 00:00" "$("$BIN" _format_mmss 0)" "00:00"
