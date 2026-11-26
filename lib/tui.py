@@ -343,6 +343,7 @@ class SovereignDashboard:
         self.last_active_path = ""
         self.tick = 0
         self._file_sigs: dict[str, tuple[int, int] | None] = {}
+        self._last_queue_sig: tuple[Any, ...] | None = None
 
     def init_colors(self) -> None:
         curses.start_color()
@@ -635,6 +636,17 @@ class SovereignDashboard:
             tag = "[PL]"
         return (row_id, title, " • ".join(parts), tag)
 
+    def _queue_state_sig(self) -> tuple[Any, ...]:
+        pl = self.mpv_state.get("playlist") or []
+        pl_sig = tuple(
+            (e.get("filename") or "", e.get("title") or "", bool(e.get("current")))
+            for e in pl
+            if isinstance(e, dict)
+        )
+        mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+        dur = int(round(float(self.mpv_state.get("duration") or 0.0)))
+        return (pl_sig, mf.get("artist") or "", mf.get("album") or "", dur)
+
     def load_tab_items(self) -> None:
         self.refresh_local_files_meta()
         if getattr(self, "nav_stack", None):
@@ -675,6 +687,7 @@ class SovereignDashboard:
                     parts.append("Active" if is_cur else "Queued")
                 qitems.append((vid, title, " • ".join(parts), "[Q]"))
             self.tracks = qitems
+            self._last_queue_sig = self._queue_state_sig()
         elif self.active_tab in ("artists", "albums"):
             entries = library.scan_library(self.download_dir, self.cache_dir / "library.json")
             favs = self.read_tsv(self.data_dir / "favorites.tsv", "[FAV]")
@@ -2766,7 +2779,8 @@ class SovereignDashboard:
             if self.tick % 2 == 0:
                 self.poll_mpv()
                 if self.active_tab == "queue":
-                    self.load_tab_items()
+                    if self._queue_state_sig() != self._last_queue_sig:
+                        self.load_tab_items()
                 else:
                     self.refresh_local_files_meta()
             self.render()

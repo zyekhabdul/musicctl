@@ -9,12 +9,18 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from common import AUDIO_EXTS, format_mmss
+
 CACHE_VERSION = 1
-AUDIO_EXTS = {".opus", ".mp3", ".m4a", ".flac", ".ogg", ".wav", ".webm"}
 MAX_SCAN_DEPTH = 4
 
 _BRACKET_ID_RE = re.compile(r"\s+\[[A-Za-z0-9_.-]{4,32}\]$")
@@ -24,13 +30,8 @@ _INT_LEAD_RE = re.compile(r"^(\d+)")
 
 
 def format_duration(sec: int) -> str:
-    """Format integer seconds into MM:SS or H:MM:SS."""
-    total = max(0, int(sec))
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    if h > 0:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
+    """Format integer seconds into M:SS or H:MM:SS."""
+    return format_mmss(sec, pad_minutes=False)
 
 
 def parse_filename_fallback(path: Path, root: Path) -> dict[str, Any]:

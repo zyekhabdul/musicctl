@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import signal
+import string
 import subprocess
 import sys
 import tempfile
@@ -31,12 +32,13 @@ import catalog
 import common
 import providers
 
-AUDIO_EXTS = {".opus", ".mp3", ".m4a", ".flac", ".ogg", ".wav", ".webm"}
+AUDIO_EXTS = common.AUDIO_EXTS
 VALID_QUALITIES = ("small", "cd", "hires")
 VALID_FORMATS = ("auto", "flac", "opus", "m4a", "mp3")
 DEFAULT_TEMPLATE = "{artist}/{album}/{track:02d} - {title}"
 BAD_PATH_CHARS_RE = re.compile(r'[/\\\x00:*?"<>|\t\r\n]+')
 SPOTIFY_URL_RE = re.compile(r"^https?://open\.spotify\.com/(track|album|playlist)/([A-Za-z0-9]+)", re.I)
+_SAFE_FORMAT_SPEC_RE = re.compile(r"^[0-9]*[ds]?$")
 
 
 parse_spotify_html = common.parse_spotify_html
@@ -57,6 +59,24 @@ def sanitize_segment(text: str) -> str:
     if cleaned in ("", ".", ".."):
         return ""
     return cleaned
+
+
+def _format_template_segment(seg: str, values: dict[str, Any]) -> str:
+    """Safely format one path template segment without attribute or item traversal."""
+    out: list[str] = []
+    for literal, field_name, spec, conv in string.Formatter().parse(seg):
+        if literal:
+            out.append(literal)
+        if field_name is None:
+            continue
+        if conv is not None or "." in field_name or "[" in field_name or field_name not in values:
+            raise ValueError(f"Unsafe or unknown template field: {field_name!r}")
+        spec_s = spec or ""
+        if not _SAFE_FORMAT_SPEC_RE.match(spec_s):
+            raise ValueError(f"Unsafe format spec: {spec_s!r}")
+        val = values[field_name]
+        out.append(format(val, spec_s) if spec_s else str(val))
+    return "".join(out)
 
 
 def render_dest_path(download_dir: Path, template: str, track: dict[str, Any], ext: str) -> Path:
@@ -87,17 +107,17 @@ def render_dest_path(download_dir: Path, template: str, track: dict[str, Any], e
     dir_parts: list[str] = []
     for seg in raw_segs[:-1]:
         try:
-            rendered = seg.format(**values)
-        except Exception:
-            rendered = seg
+            rendered = _format_template_segment(seg, values)
+        except ValueError:
+            continue
         clean = sanitize_segment(rendered)
         if clean:
             dir_parts.append(clean)
 
     last_seg = raw_segs[-1]
     try:
-        rendered_name = last_seg.format(**values)
-    except Exception:
+        rendered_name = _format_template_segment(last_seg, values)
+    except ValueError:
         rendered_name = title or tid or "track"
     if track_num == 0:
         rendered_name = re.sub(r"^0+(?:\s*[-._]\s*|\s+)", "", rendered_name)

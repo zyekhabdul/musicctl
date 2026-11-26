@@ -10,7 +10,14 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
+
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from common import format_mmss
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -104,13 +111,7 @@ def parse_duration_str(text: str) -> int:
 
 def format_duration_mmss(secs: int) -> str:
     """Format integer seconds as M:SS or H:MM:SS."""
-    if secs <= 0:
-        return ""
-    mins, rem = divmod(secs, 60)
-    hrs, mins = divmod(mins, 60)
-    if hrs > 0:
-        return f"{hrs}:{mins:02d}:{rem:02d}"
-    return f"{mins}:{rem:02d}"
+    return format_mmss(secs, pad_minutes=False) if secs > 0 else ""
 
 
 def make_entity(
@@ -1066,6 +1067,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ref.add_argument("ref")
 
     p_stdin = sub.add_parser("parse-stdin")
+    p_stdin.add_argument("--tsv", action="store_true")
     p_stdin.add_argument("source", choices=CATALOG_SOURCES)
     p_stdin.add_argument("mode", choices=("search", "browse"))
     p_stdin.add_argument("subtype", nargs="?", default="songs")
@@ -1113,7 +1115,12 @@ def main(argv: list[str] | None = None) -> int:
                     out = {"entity": trk, "items": [trk], "continuation": ""}
             else:
                 out = parse_itunes_lookup(raw, args.subtype)
-        print(json.dumps(out))
+        if args.tsv:
+            rows = out if isinstance(out, list) else (out.get("items") or [])
+            for item in rows:
+                print(entity_to_tsv_row(item))
+        else:
+            print(json.dumps(out))
         return 0
 
     if args.cmd == "search":

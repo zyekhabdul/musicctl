@@ -20,6 +20,7 @@ from typing import Any
 
 USER_AGENT = "musicctl/2.4"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+AUDIO_EXTS = frozenset({".opus", ".mp3", ".m4a", ".flac", ".ogg", ".wav", ".webm"})
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
 META_ENTITY_KINDS = frozenset({"Album", "Single", "EP", "Playlist", "Artist"})
 META_NOISE_TOKENS = frozenset(
@@ -77,8 +78,8 @@ def format_speed(val: Any) -> str:
     return f"{round(spd, 2):g}x"
 
 
-def format_mmss(secs: Any) -> str:
-    """Format seconds as MM:SS or H:MM:SS."""
+def format_mmss(secs: Any, *, pad_minutes: bool = True) -> str:
+    """Format seconds as MM:SS (or M:SS when pad_minutes=False) or H:MM:SS."""
     try:
         total = max(0, int(float(secs)))
     except (TypeError, ValueError):
@@ -87,7 +88,7 @@ def format_mmss(secs: Any) -> str:
     hrs, mins = divmod(mins, 60)
     if hrs > 0:
         return f"{hrs}:{mins:02d}:{rem:02d}"
-    return f"{mins:02d}:{rem:02d}"
+    return f"{mins:02d}:{rem:02d}" if pad_minutes else f"{mins}:{rem:02d}"
 
 
 def extract_video_id(value: str) -> str:
@@ -919,19 +920,33 @@ class MpvClient:
             tpos = float(session_data.get("time_pos") or 0.0)
         except (TypeError, ValueError):
             tpos = 0.0
-        if tpos > 1.0:
+        if tpos > 1.0 or target_pos > 0:
             deadline = time.monotonic() + max(0.5, min(float(timeout), 8.0))
             while time.monotonic() < deadline:
-                st = self.batch_get(["idle-active", "playlist-pos", "duration", "seekable"])
-                if st is not None and st.get("idle-active") is False and st.get("playlist-pos") == target_pos:
-                    try:
-                        dur_f = float(st.get("duration") or 0.0)
-                    except (TypeError, ValueError):
-                        dur_f = 0.0
-                    if dur_f > 0.0 or st.get("seekable") is True:
-                        seek_target = min(tpos, max(0.0, dur_f - 0.5)) if dur_f > 1.0 else tpos
-                        if self.send(["seek", seek_target, "absolute"]):
-                            break
+                st = self.batch_get(["idle-active", "playlist-pos", "playlist-count", "duration", "seekable"])
+                if st is not None:
+                    cur_pos = st.get("playlist-pos")
+                    if cur_pos != target_pos:
+                        pcnt_raw = st.get("playlist-count")
+                        try:
+                            pcnt_ok = pcnt_raw is None or int(pcnt_raw) > target_pos
+                        except (TypeError, ValueError):
+                            pcnt_ok = False
+                        if pcnt_ok:
+                            self.send(["set_property", "playlist-pos", target_pos])
+                        time.sleep(0.05)
+                        continue
+                    if tpos <= 1.0:
+                        break
+                    if st.get("idle-active") is False:
+                        try:
+                            dur_f = float(st.get("duration") or 0.0)
+                        except (TypeError, ValueError):
+                            dur_f = 0.0
+                        if dur_f > 0.0 or st.get("seekable") is True:
+                            seek_target = min(tpos, max(0.0, dur_f - 0.5)) if dur_f > 1.0 else tpos
+                            if self.send(["seek", seek_target, "absolute"]):
+                                break
                 time.sleep(0.05)
         return len(playlist)
 
