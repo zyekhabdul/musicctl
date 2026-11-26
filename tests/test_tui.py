@@ -1196,6 +1196,21 @@ class TestProvidersAndDownloader(unittest.TestCase):
                     self.assertIn("replaygain_track_gain", tags)
                 self.assertTrue(desc)
 
+            bad_cover = root / "bad-cover.jpg"
+            bad_cover.write_text("not-an-image", encoding="utf-8")
+            spaced_meta = {"id": "t2", "title": "To the Bone", "artist": "Pamungkas & Friends", "album": "Walk the Talk"}
+            fb_path, _ = downloader_mod.finalize_audio(
+                src_flac, root / "fb_spaced.placeholder", quality="cd", fmt="flac", track=spaced_meta, cover_file=bad_cover, src_codec="flac",
+            )
+            fb_probe = json.loads(subprocess.check_output(
+                ["ffprobe", "-v", "error", "-show_entries", "format_tags=title,artist,album", "-of", "json", str(fb_path)],
+                text=True,
+            ))
+            fb_tags = {k.lower(): v for k, v in (fb_probe.get("format", {}).get("tags") or {}).items()}
+            self.assertEqual(fb_tags.get("title"), "To the Bone")
+            self.assertEqual(fb_tags.get("artist"), "Pamungkas & Friends")
+            self.assertEqual(fb_tags.get("album"), "Walk the Talk")
+
 
 class TestLibraryIndexer(unittest.TestCase):
     def test_incremental_scan_cache_hit_and_invalidation(self):
@@ -1810,7 +1825,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertEqual(res["source"], "lrclib")
         self.assertEqual(res["synced_lines"], [(5.0, "First line"), (10.0, "Second line")])
         self.assertIn("=== Monolog - Pamungkas ===", common_mod.format_lyrics_plain(res))
-        self.assertEqual(seen_ua, ["musicctl/2.3"])
+        self.assertEqual(seen_ua, ["musicctl/2.4"])
 
         # 2. /api/get 404 -> /api/search fallback
         seen_ua.clear()
@@ -1837,7 +1852,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertIsNotNone(res2)
         assert res2 is not None
         self.assertEqual(res2["plain_text"], "Plain body")
-        self.assertTrue(all(ua == "musicctl/2.3" for ua in seen_ua))
+        self.assertTrue(all(ua == "musicctl/2.4" for ua in seen_ua))
 
         # 3. LRCLIB empty -> lyrics.ovh fallback
         seen_ua.clear()
@@ -1857,7 +1872,7 @@ class TestP1Consolidation(unittest.TestCase):
         self.assertEqual(res3["source"], "fallback")
         self.assertEqual(res3["plain_text"], "Fallback line")
         self.assertIn("[Fallback]", common_mod.format_lyrics_plain(res3))
-        self.assertTrue(all(ua == "musicctl/2.3" for ua in seen_ua))
+        self.assertTrue(all(ua == "musicctl/2.4" for ua in seen_ua))
 
     def test_common_split_shell_args_and_cli(self):
         self.assertEqual(common_mod.split_shell_args(""), [])
@@ -2008,48 +2023,7 @@ class TestWP3AdaptiveHybridTui(unittest.TestCase):
         d.last_drawer_body_h = 5
         return d
 
-    def test_compute_layout_adaptive_split_stacked_focus(self):
-        # Tall/portrait terminal (e.g. 100x55 from screenshot) uses stacked full-width layout
-        lay_tall = tui.compute_layout(55, 100, "auto", True)
-        self.assertEqual(lay_tall["effective"], "stacked")
-        self.assertEqual(lay_tall["now_playing"], (2, 9, 0, 100))
-        self.assertEqual(lay_tall["list"], (11, 27, 0, 100))
-        self.assertEqual(lay_tall["drawer"], (38, 13, 0, 100))
-        self.assertEqual(
-            lay_tall["now_playing"][1] + lay_tall["list"][1] + lay_tall["drawer"][1],
-            55 - 6,
-        )
-
-        # Wide landscape terminal uses 58/42 split
-        lay_wide = tui.compute_layout(40, 140, "auto", True)
-        self.assertEqual(lay_wide["effective"], "split")
-        self.assertEqual(lay_wide["list"], (2, 34, 0, 81))
-        self.assertEqual(lay_wide["now_playing"][2:], (81, 59))
-        self.assertEqual(lay_wide["drawer"][2:], (81, 59))
-        self.assertEqual(lay_wide["now_playing"][1] + lay_wide["drawer"][1], 34)
-
-        # Focus mode or hidden drawer hides drawer and maximizes list width
-        lay_focus = tui.compute_layout(55, 100, "focus", True)
-        self.assertEqual(lay_focus["effective"], "focus")
-        self.assertIsNone(lay_focus["drawer"])
-        self.assertEqual(lay_focus["now_playing"], (2, 5, 0, 100))
-        self.assertEqual(lay_focus["list"], (7, 44, 0, 100))
-
-        lay_hidden = tui.compute_layout(40, 140, "auto", False)
-        self.assertEqual(lay_hidden["effective"], "focus")
-        self.assertIsNone(lay_hidden["drawer"])
-
-    def test_lightweight_wave_art_size_and_placeholder_lyrics_deferral(self):
-        wave_play = tui.build_lightweight_wave(52, 4, False)
-        self.assertEqual(len(wave_play), 52)
-        self.assertGreater(len(set(wave_play)), 1)
-        self.assertEqual(tui.build_lightweight_wave(52, 4, True), "▁" * 52)
-        self.assertEqual(tui.build_lightweight_wave(0, 4, False), "")
-
-        self.assertEqual(tui.calc_art_size(9, 100), (16, 7))
-        self.assertIsNone(tui.calc_art_size(5, 100))
-        self.assertIsNone(tui.calc_art_size(10, 35))
-
+    def test_placeholder_lyrics_deferral(self):
         self.assertTrue(tui.is_placeholder_title("watch?v=TXxBzIJVdCI", "TXxBzIJVdCI"))
         self.assertTrue(tui.is_placeholder_title("TXxBzIJVdCI", "TXxBzIJVdCI"))
         self.assertTrue(tui.is_placeholder_title("", "TXxBzIJVdCI"))
@@ -2180,58 +2154,6 @@ class TestWP3AdaptiveHybridTui(unittest.TestCase):
             self.assertIn(("dl_all", None), actions)
             self.assertIn(("dl_cancel", None), actions)
             self.assertFalse(d.handle_key("q"))
-
-    def test_compute_layout_bounds_and_non_overlap_matrix(self):
-        sizes = [
-            (12, 44),
-            (13, 64),
-            (15, 50),
-            (15, 70),
-            (17, 80),
-            (18, 100),
-            (22, 100),
-            (24, 80),
-            (40, 140),
-            (55, 100),
-        ]
-        for h, w in sizes:
-            for mode in tui.LAYOUT_MODES:
-                for show_drawer in (True, False):
-                    lay = tui.compute_layout(h, w, mode, show_drawer)
-                    rects = [
-                        (name, lay[name])
-                        for name in ("list", "now_playing", "drawer")
-                        if lay.get(name) is not None
-                    ]
-                    self.assertGreaterEqual(len(rects), 1)
-                    for name, (y0, rh, x0, rw) in rects:
-                        ctx = f"{h}x{w} mode={mode} sd={show_drawer} pane={name}"
-                        self.assertGreaterEqual(y0, 2, ctx)
-                        self.assertLessEqual(y0 + rh, h - 4, ctx)
-                        self.assertGreaterEqual(x0, 0, ctx)
-                        self.assertLessEqual(x0 + rw, w, ctx)
-                        self.assertGreaterEqual(rh, 4, ctx)
-                        self.assertGreaterEqual(rw, 20, ctx)
-                    for i in range(len(rects)):
-                        n1, (y1, h1, x1, w1) = rects[i]
-                        for j in range(i + 1, len(rects)):
-                            n2, (y2, h2, x2, w2) = rects[j]
-                            x_ov = x1 < (x2 + w2) and x2 < (x1 + w1)
-                            y_ov = y1 < (y2 + h2) and y2 < (y1 + h1)
-                            self.assertFalse(
-                                x_ov and y_ov,
-                                f"overlap {n1} vs {n2} at {h}x{w} mode={mode} sd={show_drawer}",
-                            )
-
-        lay_short = tui.compute_layout(12, 44, "auto", True)
-        self.assertIsNone(lay_short["now_playing"])
-        self.assertIsNone(lay_short["drawer"])
-        self.assertLessEqual(lay_short["list"][0] + lay_short["list"][1], 8)
-
-        lay_split_short = tui.compute_layout(15, 70, "split", True)
-        self.assertIsNotNone(lay_split_short["drawer"])
-        self.assertLessEqual(lay_split_short["drawer"][0] + lay_split_short["drawer"][1], 11)
-        self.assertEqual(lay_split_short["now_playing"][1] + lay_split_short["drawer"][1], 9)
 
     def test_format_track_row_columns_wide_and_narrow(self):
         row_a = tui.format_track_row_columns("Short", "Artist A • Album X • 3:20", 72)
@@ -2492,7 +2414,6 @@ class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
         self.assertEqual(Path(mod.__file__).resolve(), widgets_path.resolve())
 
         self.assertIs(tui.compute_rmpc_layout, mod.compute_rmpc_layout)
-        self.assertIs(tui.compute_layout, mod.compute_layout)
         self.assertIs(tui.Hitbox, mod.Hitbox)
         self.assertEqual(len(mod.RMPC_TABS), 8)
 
