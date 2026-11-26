@@ -299,16 +299,59 @@ replaygain_mode_get() {
   esac
 }
 
+_MPV_SOXR_CACHE=""
+
 mpv_supports_soxr() {
-  local opts
-  opts="$(mpv --list-options 2>/dev/null || true)"
-  [[ "$opts" == *"--audio-swresample-o"* ]] || return 1
-  if command -v ffmpeg >/dev/null 2>&1; then
-    local conf
-    conf="$(ffmpeg -buildconf 2>/dev/null || true)"
-    [[ "$conf" == *"enable-libsoxr"* ]] || return 1
+  if [[ -n "$_MPV_SOXR_CACHE" ]]; then
+    [[ "$_MPV_SOXR_CACHE" == "1" ]]
+    return
   fi
-  return 0
+
+  local mpv_bin="" ff_bin="" mpv_sig="none" ff_sig="none" cache_sig="" cache_file=""
+  mpv_bin="$(command -v mpv 2>/dev/null || true)"
+  ff_bin="$(command -v ffmpeg 2>/dev/null || true)"
+  [[ -n "$mpv_bin" ]] && mpv_sig="$(stat -L -c '%Y:%s' "$mpv_bin" 2>/dev/null || echo '0:0')"
+  [[ -n "$ff_bin" ]] && ff_sig="$(stat -L -c '%Y:%s' "$ff_bin" 2>/dev/null || echo '0:0')"
+  cache_sig="${mpv_bin}|${mpv_sig}|${ff_bin}|${ff_sig}"
+
+  if [[ -n "${MUSICCTL_CACHE_DIR:-}" ]]; then
+    cache_file="$MUSICCTL_CACHE_DIR/soxr.cap"
+    if [[ -r "$cache_file" ]]; then
+      local c_val="" c_sig=""
+      {
+        IFS= read -r c_val || true
+        IFS= read -r c_sig || true
+      } <"$cache_file"
+      if [[ "$c_sig" == "$cache_sig" && ( "$c_val" == "0" || "$c_val" == "1" ) ]]; then
+        _MPV_SOXR_CACHE="$c_val"
+        [[ "$c_val" == "1" ]]
+        return
+      fi
+    fi
+  fi
+
+  local supported="1" opts=""
+  opts="$(mpv --list-options 2>/dev/null || true)"
+  if [[ "$opts" != *"--audio-swresample-o"* ]]; then
+    supported="0"
+  elif [[ -n "$ff_bin" ]]; then
+    local conf=""
+    conf="$(ffmpeg -buildconf 2>/dev/null || true)"
+    [[ "$conf" == *"enable-libsoxr"* ]] || supported="0"
+  fi
+
+  _MPV_SOXR_CACHE="$supported"
+  if [[ -n "$cache_file" ]]; then
+    mkdir -p "$MUSICCTL_CACHE_DIR" 2>/dev/null || true
+    if [[ -w "$MUSICCTL_CACHE_DIR" ]]; then
+      local tmp=""
+      tmp="$(mktemp "$MUSICCTL_CACHE_DIR/.soxr.XXXXXX" 2>/dev/null || true)"
+      if [[ -n "$tmp" ]]; then
+        printf '%s\n%s\n' "$supported" "$cache_sig" >"$tmp" 2>/dev/null && mv -f "$tmp" "$cache_file" 2>/dev/null || rm -f "$tmp"
+      fi
+    fi
+  fi
+  [[ "$supported" == "1" ]]
 }
 
 build_ytdl_raw_options() {
@@ -434,16 +477,7 @@ stop_daemon() {
 # ------------------------------------------------------------------------------
 
 parse_ytm_search_json() {
-  jq -r '
-    .. | objects | select(.musicResponsiveListItemRenderer?) | .musicResponsiveListItemRenderer
-    | {
-        id: (.playlistItemData.videoId // .overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint.videoId),
-        title: (.flexColumns[0].musicResponsiveListItemFlexColumnRenderer.text.runs[0].text),
-        meta: ([.flexColumns[1].musicResponsiveListItemFlexColumnRenderer.text.runs[]?.text] | join(""))
-      }
-    | select(.id != null and .title != null)
-    | "\(.id)\t\(.title | gsub("[\t\r\n]+"; " "))\t\((.meta // "") | gsub("[\t\r\n]+"; " "))"
-  ' 2>/dev/null
+  run_catalog_py parse-stdin --tsv ytm search songs 2>/dev/null || true
 }
 
 ytm_search_raw() {
