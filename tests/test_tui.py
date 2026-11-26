@@ -2539,7 +2539,7 @@ class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
                         sibling_groups = [
                             [b for b in (hboxes["left"], hboxes["center"], hboxes["right"]) if b is not None],
                             [lay["footer_mode"], lay["footer_progress"]],
-                            [r for r in (lay["header"], lay["tabs"], lay["search_bar"], lay["art"], lay["lyrics"], lay["list"], lay["drawer"], lay["footer"]) if r is not None],
+                            [r for r in (lay["header"], lay["tabs"], lay["search_bar"], lay["art"], lay["lyrics"], lay["list"], lay["drawer"], lay["hint_bar"], lay["footer"]) if r is not None],
                         ]
                         for rects in sibling_groups:
                             for y0, rh, x0, rw in rects:
@@ -2576,6 +2576,15 @@ class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
 
             def addstr(self, y: int, x: int, text: str, *_args) -> None:
                 self.writes.append((y, x, text))
+
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
 
         with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
             d = self._make_dash(Path(td))
@@ -2822,6 +2831,15 @@ class TestWP4CEntityTabsAutoRequeryAndModals(unittest.TestCase):
 
             def addstr(self, y: int, x: int, text: str, *_args) -> None:
                 self.writes.append((y, x, text))
+
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
 
         with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
             d = self._make_dash(Path(td))
@@ -3080,12 +3098,22 @@ class TestWP4DHybridKeymapAndHitboxAudit(unittest.TestCase):
             self.assertEqual(d.drawer_scroll, 4)
             d.active_modal = ""
 
-            # Search tab + breadcrumb/batch pills hitbox priority audit
+            # Search root hitbox priority audit
             d.active_tab = "search"
+            d.nav_stack = []
+            d.render()
+            for act in ("cycle_catalog", "set_search_type", "focus_search", "do_search", "clear_search", "row"):
+                hb = next(h for h in d.hitboxes if h.action == act)
+                resolved = resolve_hitbox(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
+                self.assertIsNotNone(resolved, f"missing reverse hit for {act}")
+                assert resolved is not None
+                self.assertEqual(resolved.action, act)
+
+            # Drill-down context bar replaces search bar and keeps table border clean
             d.nav_stack = [{"active_tab": "search", "tracks": []}]
             d.drill_title = "Album X"
             d.render()
-            for act in ("cycle_catalog", "set_search_type", "focus_search", "do_search", "clear_search", "nav_back", "play_all", "add_all", "dl_all", "row"):
+            for act in ("nav_back", "play_all", "add_all", "dl_all", "row"):
                 hb = next(h for h in d.hitboxes if h.action == act)
                 resolved = resolve_hitbox(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
                 self.assertIsNotNone(resolved, f"missing reverse hit for {act}")
@@ -3264,6 +3292,15 @@ class TestAntiMonkeypatchRegressions(unittest.TestCase):
             def addstr(self, y: int, x: int, text: str, *_args) -> None:
                 self.writes.append((y, x, text))
 
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
+
         with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
             root = Path(td)
             scr = RecordingStdscr(24, 80)
@@ -3286,6 +3323,110 @@ class TestAntiMonkeypatchRegressions(unittest.TestCase):
             help_text = "\n".join(txt for _y, _x, txt in scr.writes)
             self.assertIn("HYBRID RMPC", help_text)
             self.assertIn("J/K  o u Q e N A m ? q", help_text)
+
+
+class TestUXClarityPolish(unittest.TestCase):
+    def test_honest_mode_pill_drilldown_context_bar_and_footer_timeline(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            scr = RecordingStdscr(40, 120)
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.mpv_state = {
+                "idle-active": False,
+                "pause": True,
+                "media-title": "Shut It Down",
+                "metadata": {"artist": "Drake", "album": "Thank Me Later"},
+                "time-pos": 67.0,
+                "duration": 419.0,
+                "volume": 100,
+                "mute": False,
+                "audio-codec-name": "opus",
+                "audio-params/samplerate": 48000,
+                "playlist": [{"title": "Shut It Down", "duration": 419.0, "current": True}],
+            }
+            d.tracks = [("1", "When We Were Younger", "grentperez • When We Were Younger • 03:54", "[YTM]")]
+
+            # 1. On 6 Search with search_focus=False & active drill-down:
+            #    mode pill must say NORMAL (not SEARCH), context bar replaces scope pills,
+            #    header shows readable Vol + Loop/Shuf/EQ/Norm/Auto + [<]/[>], footer shows 01:07 .. ● .. 06:59.
+            d.active_tab = "search"
+            d.search_focus = False
+            d.catalog_source = "deezer"
+            d.drill_title = "When We Were Younger"
+            d.drill_kind = "browse"
+            d.nav_stack = [{"active_tab": "search", "tracks": []}]
+            d.render()
+            for wy, wx, wtxt in scr.writes:
+                self.assertGreaterEqual(wy, 0)
+                self.assertLess(wy, 40)
+                self.assertGreaterEqual(wx, 0)
+                self.assertLessEqual(wx + tui.display_width(wtxt), 120)
+
+            text = "\n".join(scr.row_text(r) for r in range(40))
+            self.assertIn(" NORMAL ", text)
+            self.assertNotIn(" SEARCH ", text)
+            self.assertNotIn("[Albums]", text)
+            self.assertIn("[Bksp <-]", text)
+            self.assertIn("[P Play All]", text)
+            self.assertIn("Vol ", text)
+            self.assertIn("Loop", text)
+            self.assertIn("Shuf", text)
+            self.assertIn("01:07", text)
+            self.assertIn("06:59", text)
+            self.assertIn("Enter Play", text)
+            acts = {hb.action for hb in d.hitboxes}
+            for req_act in ("prev", "toggle", "next", "vol_bar", "mute", "loop", "shuffle", "eq", "norm", "autoplay", "help", "nav_back", "play_all", "seek_bar"):
+                self.assertIn(req_act, acts)
+
+            # 2. Focusing search input switches mode pill to INPUT and context hints to typing mode
+            d.nav_stack = []
+            d.search_focus = True
+            d.render()
+            text_in = "\n".join(scr.row_text(r) for r in range(40))
+            self.assertIn(" INPUT ", text_in)
+            self.assertIn("[Albums]", text_in)
+            self.assertIn("Esc Done", text_in)
+
+    def test_context_hints_variants(self):
+        self.assertEqual(tui.build_context_hints("search", search_focus=True)[0], ("Enter", "Search"))
+        self.assertEqual(tui.build_context_hints("queue", active_modal="downloads")[1], ("X", "Cancel All"))
+        self.assertEqual(tui.build_context_hints("artists", is_group_list=True)[0], ("Enter", "Open"))
+        self.assertEqual(tui.build_context_hints("queue")[1], ("J/K", "Move"))
+        self.assertEqual(tui.build_context_hints("search", has_nav=True)[-2], ("Bksp", "Back"))
 
 
 if __name__ == "__main__":
