@@ -2580,7 +2580,7 @@ class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
                         sibling_groups = [
                             [b for b in (hboxes["left"], hboxes["center"], hboxes["right"]) if b is not None],
                             [lay["footer_mode"], lay["footer_progress"]],
-                            [r for r in (lay["header"], lay["tabs"], lay["search_bar"], lay["list"], lay["drawer"], lay["footer"]) if r is not None],
+                            [r for r in (lay["header"], lay["tabs"], lay["search_bar"], lay["art"], lay["lyrics"], lay["list"], lay["drawer"], lay["footer"]) if r is not None],
                         ]
                         for rects in sibling_groups:
                             for y0, rh, x0, rw in rects:
@@ -2668,6 +2668,502 @@ class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
             d.handle_key("/")
             self.assertEqual(d.active_tab, "search")
             self.assertTrue(d.search_focus)
+
+
+class TestWP4BTableScrollbarAndQueueSplit(unittest.TestCase):
+    def _make_dash(self, td: Path) -> tui.SovereignDashboard:
+        return TestWP3AdaptiveHybridTui()._make_dash(td)
+
+    def test_4col_table_widths_unicode_cjk_and_narrow_fallback(self):
+        self.assertIsNone(tui.compute_table_col_widths(53))
+        cols = tui.compute_table_col_widths(90)
+        self.assertIsNotNone(cols)
+        assert cols is not None
+        self.assertEqual(sum(cols) + 6, 90)
+
+        hdr = tui.format_table_header(90)
+        self.assertLessEqual(tui.display_width(hdr), 90)
+        for col_name in ("Artist", "Title", "Album", "Duration"):
+            self.assertIn(col_name, hdr)
+
+        row_cjk = tui.format_table_row_4col("米津玄師 Kenshi Yonezu", "Lemon (東京ライブ)", "STRAY SHEEP", "04:15", 90)
+        self.assertLessEqual(tui.display_width(row_cjk), 90)
+        self.assertTrue(row_cjk.endswith("  04:15"))
+
+        narrow = tui.format_table_row_4col("Pamungkas", "To the Bone", "Walk the Talk", "05:45", 42)
+        self.assertLessEqual(tui.display_width(narrow), 42)
+        self.assertIn("To the Bone", narrow)
+
+        art, ttl, alb, dur = tui.parse_track_columns("Pamungkas - Monolog", "Walk the Talk • 03:30 • Active", "[LOC]")
+        self.assertEqual((art, ttl, alb, dur), ("Walk the Talk", "Pamungkas - Monolog", "-", "03:30"))
+        art2, ttl2, alb2, dur2 = tui.parse_track_columns("Pamungkas - Monolog", "Local Audio", "[LOC]")
+        self.assertEqual((art2, ttl2, alb2, dur2), ("Pamungkas", "Monolog", "-", "-"))
+
+    def test_vertical_scrollbar_geometry(self):
+        self.assertEqual(tui.build_vertical_scrollbar(10, 10, 0, 5), ["│"] * 5)
+        self.assertEqual(tui.build_vertical_scrollbar(0, 5, 0, 4), ["│"] * 4)
+        self.assertEqual(tui.build_vertical_scrollbar(20, 5, 0, 1), ["█"])
+        self.assertEqual(tui.build_vertical_scrollbar(20, 5, 0, 2), ["▲", "▼"])
+
+        sb_top = tui.build_vertical_scrollbar(40, 10, 0, 10)
+        sb_bot = tui.build_vertical_scrollbar(40, 10, 30, 10)
+        self.assertEqual(len(sb_top), 10)
+        self.assertEqual(sb_top[0], "▲")
+        self.assertEqual(sb_top[-1], "▼")
+        self.assertEqual(sb_top[1], "█")
+        self.assertEqual(sb_bot[-2], "█")
+
+    def test_queue_35_65_split_and_entity_full_width_render(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h = h
+                self.w = w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        lay_q = tui.compute_rmpc_layout(40, 140, "auto", True, active_tab="queue")
+        self.assertEqual(lay_q["effective"], "split")
+        self.assertIsNotNone(lay_q["art"])
+        self.assertIsNotNone(lay_q["lyrics"])
+        self.assertIsNone(lay_q["drawer"])
+        self.assertEqual(lay_q["art"][3], 49)
+        self.assertEqual(lay_q["list"][2:], (49, 91))
+
+        lay_ent = tui.compute_rmpc_layout(40, 140, "auto", True, active_tab="local")
+        self.assertEqual(lay_ent["effective"], "focus")
+        self.assertIsNone(lay_ent["art"])
+        self.assertIsNone(lay_ent["lyrics"])
+        self.assertEqual(lay_ent["list"][2:], (0, 140))
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            d = self._make_dash(Path(td))
+            d.mpv_state = {
+                "idle-active": False,
+                "pause": False,
+                "media-title": "To the Bone",
+                "metadata": {"artist": "Pamungkas", "album": "Walk the Talk", "date": "2018"},
+                "time-pos": 30.0,
+                "duration": 225.0,
+                "volume": 80,
+                "mute": False,
+                "playlist": [{"title": f"Track {i}", "duration": 200.0, "current": (i == 0)} for i in range(40)],
+            }
+            d.tracks = [(f"id{i:09d}", f"Track {i}", f"Artist {i} • Album {i} • 03:20", "[Q]") for i in range(40)]
+            d.lyrics_header = "To the Bone - Pamungkas"
+            d.lyrics_lines = [(float(i * 3), f"Lyric line {i}") for i in range(30)]
+
+            for tab, (h, w) in (("queue", (40, 140)), ("queue", (24, 88)), ("local", (40, 140)), ("lyrics", (24, 72))):
+                scr = RecordingStdscr(h, w)
+                d.stdscr = scr
+                d.active_tab = tab
+                d.render()
+                joined = "\n".join(txt for _y, _x, txt in scr.writes)
+                for wy, wx, wtxt in scr.writes:
+                    self.assertGreaterEqual(wy, 0)
+                    self.assertLess(wy, h)
+                    self.assertGreaterEqual(wx, 0)
+                    self.assertLessEqual(wx + tui.display_width(wtxt), w, f"overflow {tab} {h}x{w}: {wy},{wx} {wtxt!r}")
+                if tab == "queue":
+                    self.assertIn("Album Art", joined)
+                    self.assertIn("Lyrics", joined)
+                    self.assertIn("█", joined)
+                    if w >= 100:
+                        self.assertIn("Duration", joined)
+                    else:
+                        self.assertIn("Track 0", joined)
+                elif tab == "local":
+                    self.assertIn("Artist", joined)
+                    self.assertIn("Duration", joined)
+                elif tab == "lyrics":
+                    self.assertIn("Lyric line", joined)
+
+
+class TestWP4CEntityTabsAutoRequeryAndModals(unittest.TestCase):
+    def _make_dash(self, td: Path) -> tui.SovereignDashboard:
+        d = TestWP3AdaptiveHybridTui()._make_dash(td)
+        d.search_loading = False
+        d.active_modal = ""
+        d._entity_groups = {}
+        return d
+
+    def test_entity_aggregation_artists_albums_and_merged_history(self):
+        favs = [("vid1", "Song Fav", "Artist A • Album X • 03:00", "[FAV]")]
+        hist = [
+            ("vid1", "Song Fav", "Artist A • Album X • 03:00", "[HIS]"),
+            ("vid2", "Song Hist", "Artist B • Album X • 02:30", "[HIS]"),
+        ]
+        merged = tui.merge_fav_and_history(favs, hist)
+        self.assertEqual([r[0] for r in merged], ["vid1", "vid2"])
+        self.assertEqual(merged[0][3], "[FAV]")
+
+        local_entries = [
+            {"path": "/music/a.flac", "title": "Song Loc", "artist": "Artist A", "album": "Album Y", "duration": 200, "codec": "flac"},
+        ]
+        art_rows, art_groups = tui.aggregate_artists(local_entries, favs, hist)
+        self.assertEqual([(r[1], r[2], r[3]) for r in art_rows], [("Artist A", "2 tracks", "[E-ART]"), ("Artist B", "1 tracks", "[E-ART]")])
+        self.assertEqual(len(art_groups["eart:Artist A"]), 2)
+
+        alb_rows, alb_groups = tui.aggregate_albums(local_entries, favs, hist)
+        self.assertEqual(
+            [(r[1], r[2], r[3]) for r in alb_rows],
+            [("Album X", "Various Artists • 2 tracks", "[E-ALB]"), ("Album Y", "Artist A • 1 tracks", "[E-ALB]")],
+        )
+        self.assertEqual(len(alb_groups["ealb:Album X"]), 2)
+
+        with tempfile.TemporaryDirectory() as td:
+            d = self._make_dash(Path(td))
+            d.data_dir.mkdir(parents=True, exist_ok=True)
+            loc_f = d.download_dir / "Artist A" / "Album Y" / "01 - Song Loc.flac"
+            loc_f.parent.mkdir(parents=True, exist_ok=True)
+            loc_f.write_bytes(b"fake-flac")
+            (d.data_dir / "favorites.tsv").write_text("vid1\tSong Fav\tArtist A • Album X • 03:00\n", encoding="utf-8")
+            (d.data_dir / "history.tsv").write_text("vid1\tSong Fav\tArtist A • Album X • 03:00\nvid2\tSong Hist\tArtist B • Album X • 02:30\n", encoding="utf-8")
+            pl_dir = d.data_dir / "playlists"
+            pl_dir.mkdir(parents=True, exist_ok=True)
+            (pl_dir / "chill.tsv").write_text("vid1\tSong Fav\tArtist A • Album X • 03:00\n", encoding="utf-8")
+
+            d.handle_action("tab", "artists")
+            self.assertEqual([r[1] for r in d.tracks], ["Artist A", "Artist B"])
+            d.selected_idx = 0
+            d.play_selected()  # drill into Artist A
+            self.assertEqual(len(d.nav_stack), 1)
+            self.assertEqual(d.drill_ref, "eart:Artist A")
+            self.assertEqual(len(d.tracks), 2)
+            self.assertTrue(d.pop_nav())
+            self.assertEqual([r[1] for r in d.tracks], ["Artist A", "Artist B"])
+
+            d.handle_action("tab", "albums")
+            self.assertEqual([r[1] for r in d.tracks], ["Album X", "Album Y"])
+            d.handle_action("tab", "playlists")
+            self.assertEqual([r[0] for r in d.tracks], ["pl:chill"])
+            d.handle_action("tab", "hist")
+            self.assertEqual([(r[0], r[3]) for r in d.tracks], [("vid1", "[FAV]"), ("vid2", "[HIS]")])
+
+    def test_search_scope_and_catalog_auto_requery_and_isolation(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            d = self._make_dash(Path(td))
+            searched: list[tuple[str, str, str]] = []
+            d.trigger_search = lambda q: searched.append((q, d.catalog_source, d.search_type))  # type: ignore[method-assign]
+
+            # Search bar must NOT render outside tab 6 Search
+            scr = RecordingStdscr(40, 140)
+            d.stdscr = scr
+            d.active_tab = "queue"
+            d.search_focus = False
+            d.render()
+            self.assertNotIn("C:ytm", "\n".join(t for _, _, t in scr.writes))
+
+            # focus_search switches to search tab and focuses input
+            d.handle_action("focus_search", None)
+            self.assertEqual(d.active_tab, "search")
+            self.assertTrue(d.search_focus)
+            d.render()
+            self.assertIn("C:ytm", "\n".join(t for _, _, t in scr.writes))
+
+            # Empty query does not auto-requery
+            d.search_query = ""
+            d.handle_action("set_search_type", "albums")
+            self.assertEqual(searched, [])
+
+            # Non-empty query immediately triggers search on scope/catalog change
+            d.search_query = "pamungkas"
+            d.handle_action("set_search_type", "artists")
+            d.handle_action("cycle_search_type", None)
+            d.handle_action("cycle_catalog", None)
+            self.assertEqual(
+                searched,
+                [
+                    ("pamungkas", "ytm", "artists"),
+                    ("pamungkas", "ytm", "playlists"),
+                    ("pamungkas", "deezer", "playlists"),
+                ],
+            )
+
+    def test_dl_and_info_overlay_modals_and_hitbox_priority(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        def hit_action(dash, mx: int, my: int) -> str | None:
+            hb = next((h for h in reversed(dash.hitboxes) if h.contains(mx, my)), None)
+            return hb.action if hb else None
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            d = self._make_dash(Path(td))
+            scr = RecordingStdscr(32, 120)
+            d.stdscr = scr
+            d.active_tab = "queue"
+            d.tracks = [("id123456789", "To the Bone", "Pamungkas • Walk the Talk • 05:45", "[Q]")]
+            d.dl_jobs = [{"job_id": "j1", "title": "To the Bone", "stage": "fetching", "pct": 55, "status": "running"}]
+            d.last_layout = tui.compute_rmpc_layout(32, 120, "auto", True, active_tab="queue")
+            self.assertIsNone(d.last_layout["drawer"])
+
+            # D opens downloads modal; child buttons beat noop/close_modal; Esc closes
+            d.handle_key("D")
+            self.assertEqual(d.active_modal, "downloads")
+            d.render()
+            cancel_hb = next(h for h in d.hitboxes if h.action == "dl_cancel")
+            close_hb = next(h for h in d.hitboxes if h.action == "close_modal" and h.y0 > 0)
+            self.assertEqual(hit_action(d, cancel_hb.x0, cancel_hb.y0), "dl_cancel")
+            self.assertEqual(hit_action(d, close_hb.x0, close_hb.y0), "close_modal")
+            self.assertEqual(hit_action(d, 0, 0), "close_modal")
+            d.handle_key(27)
+            self.assertEqual(d.active_modal, "")
+
+            # I opens info modal; action buttons resolve cleanly; Esc closes
+            d.handle_key("I")
+            self.assertEqual(d.active_modal, "info")
+            d.render()
+            for act in ("play_sel", "add_sel", "radio_sel", "fav_sel", "dl_sel", "q_up", "q_down"):
+                hb = next(h for h in d.hitboxes if h.action == act)
+                self.assertEqual(hit_action(d, hb.x0, hb.y0), act)
+            d.handle_key(27)
+            self.assertEqual(d.active_modal, "")
+
+
+class TestWP4DHybridKeymapAndHitboxAudit(unittest.TestCase):
+    def _make_dash(self, td: Path) -> tui.SovereignDashboard:
+        d = TestWP3AdaptiveHybridTui()._make_dash(td)
+        d.search_focus = False
+        d.search_loading = False
+        d.active_modal = ""
+        d.dl_jobs = []
+        d._entity_groups = {}
+        d.eq_mode = "flat"
+        d.norm_on = False
+        d.autoplay_on = False
+        d.quality_tier = "cd"
+        d.sleep_rem = ""
+        d.catalog_source = "ytm"
+        d.search_type = "songs"
+        d.local_group_mode = "flat"
+        return d
+
+    def test_rmpc_hybrid_keyboard_aliases_and_modal_paging(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = self._make_dash(Path(td))
+            actions: list[tuple[str, object]] = []
+            mpv_cmds: list[list[object]] = []
+            moves: list[int] = []
+            d.handle_action = lambda act, payload=None, bstate=0: actions.append((act, payload))  # type: ignore[method-assign]
+            d.mpv = unittest.mock.Mock()
+            d.mpv.send.side_effect = lambda cmd: mpv_cmds.append(list(cmd)) or True
+            d.move_queue_selected = lambda delta: moves.append(delta)  # type: ignore[method-assign]
+
+            for key, expected in (
+                ("p", ("toggle", None)),
+                (" ", ("toggle", None)),
+                (">", ("next", None)),
+                ("n", ("next", None)),
+                ("<", ("prev", None)),
+                ("b", ("prev", None)),
+                (".", ("vol_delta", 5)),
+                ("+", ("vol_delta", 5)),
+                (",", ("vol_delta", -5)),
+                ("-", ("vol_delta", -5)),
+                ("s", ("stop", None)),
+                ("x", ("stop", None)),
+                ("o", ("loop", None)),
+                ("u", ("shuffle", None)),
+                ("v", ("cycle_layout", None)),
+                ("z", ("toggle_drawer", None)),
+            ):
+                actions.clear()
+                d.handle_key(key)
+                self.assertEqual(actions, [expected], f"key={key!r}")
+
+            d.active_tab = "queue"
+            d.handle_key("J")
+            d.handle_key("K")
+            self.assertEqual(moves, [1, -1])
+
+            d.handle_key("[")
+            d.handle_key("]")
+            self.assertEqual(mpv_cmds, [["seek", -10, "relative"], ["seek", 10, "relative"]])
+
+        # Modal paging via real handle_action for downloads modal
+        with tempfile.TemporaryDirectory() as td:
+            d = self._make_dash(Path(td))
+            d.last_layout = {"drawer": None}
+            d.handle_key("D")
+            self.assertEqual(d.active_modal, "downloads")
+            d.drawer_scroll = 0
+            d.handle_key(getattr(tui.curses, "KEY_NPAGE", 338))
+            self.assertEqual(d.drawer_scroll, 6)
+            d.handle_key(4)  # Ctrl-D
+            self.assertEqual(d.drawer_scroll, 12)
+            d.handle_key(getattr(tui.curses, "KEY_PPAGE", 339))
+            self.assertEqual(d.drawer_scroll, 6)
+            d.handle_key(21)  # Ctrl-U
+            self.assertEqual(d.drawer_scroll, 0)
+            d.handle_key("G")
+            self.assertGreater(d.drawer_scroll, 0)
+            d.handle_key("g")
+            self.assertEqual(d.drawer_scroll, 0)
+            d.handle_key(27)
+            self.assertEqual(d.active_modal, "")
+
+    def test_hitbox_priority_across_header_tabs_table_search_footer_and_wheel(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        def resolve_hitbox(hitboxes: list[tui.Hitbox], mx: int, my: int) -> tui.Hitbox | None:
+            for hb in reversed(hitboxes):
+                if hb.contains(mx, my):
+                    return hb
+            return None
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            d = self._make_dash(Path(td))
+            scr = RecordingStdscr(40, 140)
+            d.stdscr = scr
+            d.active_tab = "queue"
+            d.mpv_state = {
+                "idle-active": False,
+                "pause": False,
+                "media-title": "To the Bone",
+                "metadata": {"artist": "Pamungkas", "album": "Walk the Talk", "date": "2018"},
+                "time-pos": 30.0,
+                "duration": 225.0,
+                "volume": 80,
+                "mute": False,
+                "audio-codec-name": "opus",
+                "audio-params/samplerate": 48000,
+                "playlist": [{"title": f"Track {i}", "duration": 200.0, "current": (i == 0)} for i in range(6)],
+            }
+            d.tracks = [(f"id{i:09d}", f"Track {i}", f"Artist {i} • Album {i} • 03:20", "[Q]") for i in range(6)]
+            d.lyrics_header = "To the Bone - Pamungkas"
+            d.lyrics_lines = [(float(i * 3), f"Lyric line {i}") for i in range(40)]
+            d.render()
+
+            for act in ("toggle", "vol_bar", "mute", "loop", "shuffle", "eq", "norm", "autoplay", "help", "seek_bar"):
+                hb = next(h for h in d.hitboxes if h.action == act)
+                resolved = resolve_hitbox(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
+                self.assertIsNotNone(resolved, f"missing reverse hit for {act}")
+                assert resolved is not None
+                self.assertEqual(resolved.action, act)
+
+            for tab_key, _ in tui.RMPC_TABS:
+                hb = next(h for h in d.hitboxes if h.action == "tab" and h.payload == tab_key)
+                resolved = resolve_hitbox(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
+                self.assertIsNotNone(resolved)
+                assert resolved is not None
+                self.assertEqual((resolved.action, resolved.payload), ("tab", tab_key))
+
+            row0 = next(h for h in d.hitboxes if h.action == "row" and h.payload == 0)
+            res_row0 = resolve_hitbox(d.hitboxes, row0.x0 + 2, row0.y0)
+            self.assertIsNotNone(res_row0)
+            assert res_row0 is not None
+            self.assertEqual((res_row0.action, res_row0.payload), ("row", 0))
+
+            ly, lh, lx, lw = d.last_layout["list"]
+            res_empty = resolve_hitbox(d.hitboxes, lx + 2, ly + lh - 2)
+            self.assertIsNotNone(res_empty)
+            assert res_empty is not None
+            self.assertEqual((res_empty.action, res_empty.payload), ("focus_pane", "list"))
+
+            lyr_y, lyr_h, lyr_x, lyr_w = d.last_layout["lyrics"]
+            res_lyr = resolve_hitbox(d.hitboxes, lyr_x + 2, lyr_y + lyr_h - 2)
+            self.assertIsNotNone(res_lyr)
+            assert res_lyr is not None
+            self.assertEqual((res_lyr.action, res_lyr.payload), ("focus_pane", "drawer"))
+
+            # Wheel routing: over Queue lyrics pane scrolls drawer_scroll without changing selected_idx
+            d.drawer_scroll = 0
+            d.selected_idx = 0
+            d.handle_mouse_wheel(lyr_x + 2, lyr_y + 2, 3)
+            self.assertEqual(d.drawer_scroll, 3)
+            self.assertEqual(d.selected_idx, 0)
+            # Over list pane scrolls selected_idx
+            d.handle_mouse_wheel(lx + 2, row0.y0, 3)
+            self.assertEqual(d.selected_idx, 3)
+            # While modal open, wheel scrolls drawer_scroll regardless of cursor position
+            d.active_modal = "downloads"
+            d.drawer_scroll = 1
+            d.handle_mouse_wheel(lx + 2, row0.y0, 3)
+            self.assertEqual(d.drawer_scroll, 4)
+            d.active_modal = ""
+
+            # Search tab + breadcrumb/batch pills hitbox priority audit
+            d.active_tab = "search"
+            d.nav_stack = [{"active_tab": "search", "tracks": []}]
+            d.drill_title = "Album X"
+            d.render()
+            for act in ("cycle_catalog", "set_search_type", "focus_search", "do_search", "clear_search", "nav_back", "play_all", "add_all", "dl_all", "row"):
+                hb = next(h for h in d.hitboxes if h.action == act)
+                resolved = resolve_hitbox(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
+                self.assertIsNotNone(resolved, f"missing reverse hit for {act}")
+                assert resolved is not None
+                self.assertEqual(resolved.action, act)
+
+            # Help modal renders updated rmpc shortcuts cleanly without overflow
+            d.nav_stack = []
+            d.show_help = True
+            d.render()
+            help_text = "\n".join(txt for _y, _x, txt in scr.writes)
+            self.assertIn("HYBRID RMPC", help_text)
+            self.assertIn("Space / p", help_text)
+            self.assertIn("< / >", help_text)
+            self.assertIn(", / .", help_text)
+            help_close = resolve_hitbox(d.hitboxes, 0, 0)
+            self.assertIsNotNone(help_close)
+            assert help_close is not None
+            self.assertEqual(help_close.action, "close_help")
 
 
 if __name__ == "__main__":
