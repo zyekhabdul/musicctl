@@ -2340,5 +2340,186 @@ class TestWP3AdaptiveHybridTui(unittest.TestCase):
             self.assertEqual(hit_action(d, 130, 28), "focus_pane")
 
 
+class TestHardening(unittest.TestCase):
+    def test_downloader_cross_process_flock_archive_and_jobs(self):
+        with tempfile.TemporaryDirectory(prefix="musicctl-flock-") as tmp:
+            tdir = Path(tmp)
+            archive_path = tdir / "download-archive.tsv"
+            data_dir = tdir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            worker_code = (
+                "import importlib.util, sys, threading\n"
+                "from pathlib import Path\n"
+                "spec = importlib.util.spec_from_file_location('dl', sys.argv[1])\n"
+                "dl = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(dl)\n"
+                "wid = int(sys.argv[2])\n"
+                "arch = Path(sys.argv[3])\n"
+                "ddir = Path(sys.argv[4])\n"
+                "lock = threading.Lock()\n"
+                "for i in range(5):\n"
+                "    tkey = f'w{wid}-t{i}'\n"
+                "    dl.record_archive(arch, lock, tkey, 'cd', 'auto', ddir / f'{tkey}.flac')\n"
+                "    dl._upsert_job(ddir, lock, {'job_id': f'job-{wid}-{i}', 'status': 'done', 'done': 1, 'total': 1})\n"
+            )
+            procs = [
+                subprocess.Popen([sys.executable, "-c", worker_code, str(DOWNLOADER_PATH), str(w), str(archive_path), str(data_dir)])
+                for w in range(3)
+            ]
+            for p in procs:
+                self.assertEqual(p.wait(timeout=15), 0)
+
+            archive_map = downloader_mod.load_archive(archive_path)
+            self.assertEqual(len(archive_map), 15)
+            for w in range(3):
+                for i in range(5):
+                    self.assertIn((f"w{w}-t{i}", "cd", "auto"), archive_map)
+
+            jobs = downloader_mod._load_jobs(data_dir)
+            self.assertEqual(len(jobs), 15)
+            self.assertEqual({j["job_id"] for j in jobs}, {f"job-{w}-{i}" for w in range(3) for i in range(5)})
+
+    def test_mpv_resume_polls_until_ready_and_avoids_sticky_start(self):
+        client = common_mod.MpvClient("/tmp/unused.sock", timeout=1.0)
+        states = iter([
+            {"idle-active": False, "playlist-pos": 1, "duration": None, "seekable": False},
+            {"idle-active": False, "playlist-pos": 1, "duration": None, "seekable": False},
+            {"idle-active": False, "playlist-pos": 1, "duration": 180.0, "seekable": True},
+        ])
+        with (
+            mock.patch.object(client, "batch_send", return_value=(10, 10)),
+            mock.patch.object(client, "batch_get", side_effect=lambda _props: next(states)),
+            mock.patch.object(client, "send", return_value=True) as mock_send,
+        ):
+            cnt = client.resume_session(
+                {"playlist": ["a.flac", "b.flac"], "playlist_pos": 1, "time_pos": 42.5},
+                timeout=2.0,
+            )
+        self.assertEqual(cnt, 2)
+        mock_send.assert_called_once_with(["seek", 42.5, "absolute"])
+
+        with tempfile.TemporaryDirectory(prefix="musicctl-resume-") as tmp:
+            sock = os.path.join(tmp, "mpv.sock")
+            wav1 = os.path.join(tmp, "s1.wav")
+            wav2 = os.path.join(tmp, "s2.wav")
+            for wp in (wav1, wav2):
+                with wave.open(wp, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(8000)
+                    wf.writeframes(b"\x00\x00" * 8000 * 5)
+
+            proc = subprocess.Popen(
+                ["mpv", "--no-video", "--idle=yes", "--force-window=no", "--ao=null", f"--input-ipc-server={sock}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                for _ in range(50):
+                    if os.path.exists(sock):
+                        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        try:
+                            s.connect(sock)
+                            s.close()
+                            break
+                        except OSError:
+                            s.close()
+                    time.sleep(0.05)
+
+                live_client = common_mod.MpvClient(sock, timeout=1.0)
+                cnt2 = live_client.resume_session(
+                    {"playlist": [wav1, wav2], "playlist_pos": 1, "time_pos": 2.2},
+                    timeout=4.0,
+                )
+                self.assertEqual(cnt2, 2)
+                st = live_client.batch_get(["playlist-pos", "time-pos"])
+                self.assertIsNotNone(st)
+                assert st is not None
+                self.assertEqual(st["playlist-pos"], 1)
+                self.assertGreaterEqual(float(st["time-pos"] or 0.0), 1.8)
+
+                # Switching away and back must start at 0:00 (no sticky loadfile start= option).
+                self.assertTrue(live_client.send(["set_property", "playlist-pos", 0]))
+                time.sleep(0.1)
+                self.assertTrue(live_client.send(["set_property", "playlist-pos", 1]))
+                for _ in range(20):
+                    st_back = live_client.batch_get(["playlist-pos", "time-pos", "idle-active"])
+                    if st_back and st_back.get("idle-active") is False and st_back.get("playlist-pos") == 1 and st_back.get("time-pos") is not None:
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(st_back)
+                assert st_back is not None
+                self.assertLess(float(st_back["time-pos"] or 0.0), 1.2)
+                live_client.send(["quit"])
+            finally:
+                proc.terminate()
+                proc.wait(timeout=3)
+
+    def test_providers_resolve_batch_cache_provider_and_ytm_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="musicctl-batch-") as tmp:
+            tdir = Path(tmp)
+            pdir = tdir / "providers"
+            cdir = tdir / "cache"
+            pdir.mkdir()
+            cdir.mkdir()
+
+            cached_id = "dQw4w9WgXcQ"
+            cached_file = cdir / f"{cached_id}.opus"
+            cached_file.write_bytes(b"cached-opus-data")
+
+            dz_cached_id = "abcDEF12345"
+            dz_cached_file = cdir / f"{dz_cached_id}.flac"
+            dz_cached_file.write_bytes(b"cached-flac-data")
+
+            prov_target = tdir / "stream.flac"
+            prov_target.write_bytes(b"mock-flac")
+            prov_script = pdir / "10-mock.sh"
+            prov_script.write_text(
+                "#!/usr/bin/env bash\n"
+                "req=$(cat)\n"
+                "id=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get(\"id\",\"\"))' \"$req\")\n"
+                "if [ \"$id\" = \"ytmProv1234\" ]; then\n"
+                f"  printf '{{\"provider\":\"mock\",\"url\":\"{prov_target}\",\"headers\":{{\"X-Auth\":\"tok\"}}}}\\n'\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            prov_script.chmod(0o755)
+
+            items = [
+                {"source": "ytm", "type": "album", "id": "MPREb_skip", "title": "Album Row"},
+                {"source": "ytm", "type": "song", "id": cached_id, "title": "Cached Song", "artist": "Art A", "album": "Alb A", "duration": 185},
+                {"source": "ytm", "type": "song", "id": "ytmProv1234", "title": "Prov Song", "artist": "Art B", "duration": 200},
+                {"source": "ytm", "type": "song", "id": "ytmWatch123", "title": "Watch Song", "artist": "Art C", "duration": 90},
+                {"source": "deezer", "type": "song", "id": "999", "title": "Deezer Song", "artist": "Art D", "album": "Alb D", "duration": 210},
+            ]
+
+            res = providers_mod.resolve_catalog_batch(
+                items,
+                "cd",
+                pdir,
+                cache_audio_dir=cdir,
+                ytm_fallback_fn=lambda q: dz_cached_id if "Deezer Song" in q else "",
+            )
+            self.assertEqual(len(res), 4)
+            self.assertEqual(res[0], {"url": str(cached_file), "title": "Cached Song", "headers": {}, "hid": cached_id, "meta": "Art A • Alb A • 03:05"})
+            self.assertEqual(res[1], {"url": str(prov_target), "title": "Prov Song", "headers": {"X-Auth": "tok"}, "hid": "ytmProv1234", "meta": "Art B • 03:20"})
+            self.assertEqual(res[2], {"url": "https://www.youtube.com/watch?v=ytmWatch123", "title": "Watch Song", "headers": {}, "hid": "ytmWatch123", "meta": "Art C • 01:30"})
+            self.assertEqual(res[3], {"url": str(dz_cached_file), "title": "Deezer Song", "headers": {}, "hid": dz_cached_id, "meta": "Art D • Alb D • 03:30"})
+
+            cli_proc = subprocess.run(
+                [sys.executable, str(PROVIDERS_PATH), "resolve-batch", "cd", str(cdir)],
+                input=json.dumps({"items": items[:4]}),
+                text=True,
+                capture_output=True,
+                env={**os.environ, "MUSICCTL_PROVIDERS_DIR": str(pdir)},
+                check=True,
+            )
+            lines = [json.loads(ln) for ln in cli_proc.stdout.splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 3)
+            self.assertEqual(lines[0]["url"], str(cached_file))
+            self.assertEqual(lines[1]["headers"], {"X-Auth": "tok"})
+            self.assertEqual(lines[2]["url"], "https://www.youtube.com/watch?v=ytmWatch123")
+
+
 if __name__ == "__main__":
     unittest.main()
