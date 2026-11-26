@@ -265,22 +265,13 @@ class TestTuiHelpers(unittest.TestCase):
 
     @staticmethod
     def _make_headless_dashboard():
-        dash = tui.SovereignDashboard.__new__(tui.SovereignDashboard)
-        dash.ui_events = queue.SimpleQueue()
+        dash = tui.SovereignDashboard(
+            stdscr=None,
+            art_enabled=False,
+            mpv=unittest.mock.Mock(),
+            dl_manager=unittest.mock.Mock(),
+        )
         dash.active_tab = "home"
-        dash.search_loading = False
-        dash.search_seq = 0
-        dash.search_results = []
-        dash.tracks = []
-        dash.selected_idx = 0
-        dash.scroll_top = 0
-        dash.lyrics_track_key = ""
-        dash.lyrics_header = ""
-        dash.lyrics_lines = []
-        dash.lyrics_loading = False
-        dash.heal_inflight = set()
-        dash.toast_msg = ""
-        dash.toast_until = 0.0
         dash._poll_calls = 0
         dash._load_calls = 0
         dash.poll_mpv = lambda: setattr(dash, "_poll_calls", dash._poll_calls + 1)
@@ -1408,39 +1399,27 @@ class TestProvidersV2AndHooks(unittest.TestCase):
 
 class TestTuiWP2GH(unittest.TestCase):
     def _make_dash(self, td: Path) -> tui.SovereignDashboard:
-        d = tui.SovereignDashboard.__new__(tui.SovereignDashboard)
-        d.data_dir = td / "data"
-        d.cache_dir = td / "cache"
-        d.download_dir = td / "dl"
-        d.data_dir.mkdir(parents=True, exist_ok=True)
-        d.cache_dir.mkdir(parents=True, exist_ok=True)
-        d.download_dir.mkdir(parents=True, exist_ok=True)
-        d.ui_events = queue.SimpleQueue()
-        d.lock = threading.Lock()
+        data_dir = td / "data"
+        cache_dir = td / "cache"
+        download_dir = td / "dl"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        download_dir.mkdir(parents=True, exist_ok=True)
+        d = tui.SovereignDashboard(
+            stdscr=None,
+            data_dir=data_dir,
+            cache_dir=cache_dir,
+            download_dir=download_dir,
+            art_enabled=False,
+            mpv=unittest.mock.Mock(),
+            dl_manager=unittest.mock.Mock(),
+        )
         d.active_tab = "home"
-        d.right_tab = "upnext"
         d.catalog_source = "ytm"
-        d.search_type = "songs"
-        d.local_group_mode = "flat"
-        d.nav_stack = []
-        d.drill_title = ""
-        d.drill_ref = ""
-        d.drill_kind = ""
-        d._local_groups = {}
-        d.tracks = []
-        d.search_results = []
-        d.selected_idx = 0
-        d.scroll_top = 0
-        d.mpv_state = {}
         d.eq_mode = "flat"
         d.norm_on = False
         d.quality_mode = "cd"
         d.autoplay_on = False
-        d.sleep_rem = ""
-        d.fav_ids = set()
-        d.toast_msg = ""
-        d.toast_until = 0.0
-        d.dl_jobs = []
         return d
 
     def test_dl_jsonl_parser_and_drain_ui_events(self):
@@ -2025,28 +2004,8 @@ class TestP1Consolidation(unittest.TestCase):
 class TestWP3AdaptiveHybridTui(unittest.TestCase):
     def _make_dash(self, td: Path) -> tui.SovereignDashboard:
         d = TestTuiWP2GH()._make_dash(td)
-        d.layout_mode = "auto"
-        d.show_drawer = True
-        d.focus_pane = "list"
-        d.drawer_scroll = 0
-        d.drawer_sel = 0
         d.last_list_body_h = 6
         d.last_drawer_body_h = 5
-        d.last_layout = {}
-        d.last_active_path = ""
-        d.lyrics_track_key = ""
-        d.lyrics_header = ""
-        d.lyrics_lines = []
-        d.lyrics_loading = False
-        d.search_focus = False
-        d.search_query = ""
-        d.show_help = False
-        d.art_enabled = False
-        d.art_cache = {}
-        d.art_inflight = set()
-        d.healed_vids = set()
-        d.heal_inflight = set()
-        d.tick = 0
         return d
 
     def test_compute_layout_adaptive_split_stacked_focus(self):
@@ -2791,11 +2750,7 @@ class TestWP4BTableScrollbarAndQueueSplit(unittest.TestCase):
 
 class TestWP4CEntityTabsAutoRequeryAndModals(unittest.TestCase):
     def _make_dash(self, td: Path) -> tui.SovereignDashboard:
-        d = TestWP3AdaptiveHybridTui()._make_dash(td)
-        d.search_loading = False
-        d.active_modal = ""
-        d._entity_groups = {}
-        return d
+        return TestWP3AdaptiveHybridTui()._make_dash(td)
 
     def test_entity_aggregation_artists_albums_and_merged_history(self):
         favs = [("vid1", "Song Fav", "Artist A • Album X • 03:00", "[FAV]")]
@@ -2964,21 +2919,7 @@ class TestWP4CEntityTabsAutoRequeryAndModals(unittest.TestCase):
 
 class TestWP4DHybridKeymapAndHitboxAudit(unittest.TestCase):
     def _make_dash(self, td: Path) -> tui.SovereignDashboard:
-        d = TestWP3AdaptiveHybridTui()._make_dash(td)
-        d.search_focus = False
-        d.search_loading = False
-        d.active_modal = ""
-        d.dl_jobs = []
-        d._entity_groups = {}
-        d.eq_mode = "flat"
-        d.norm_on = False
-        d.autoplay_on = False
-        d.quality_tier = "cd"
-        d.sleep_rem = ""
-        d.catalog_source = "ytm"
-        d.search_type = "songs"
-        d.local_group_mode = "flat"
-        return d
+        return TestWP3AdaptiveHybridTui()._make_dash(td)
 
     def test_rmpc_hybrid_keyboard_aliases_and_modal_paging(self):
         with tempfile.TemporaryDirectory() as td:
@@ -3164,6 +3105,187 @@ class TestWP4DHybridKeymapAndHitboxAudit(unittest.TestCase):
             self.assertIsNotNone(help_close)
             assert help_close is not None
             self.assertEqual(help_close.action, "close_help")
+
+
+class TestAntiMonkeypatchRegressions(unittest.TestCase):
+    def test_constructor_di_initializes_full_dashboard_without_new(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stub_mpv = unittest.mock.Mock()
+            stub_dl = unittest.mock.Mock()
+            d = tui.SovereignDashboard(
+                stdscr=None,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=stub_mpv,
+                dl_manager=stub_dl,
+            )
+            self.assertEqual(d.data_dir, root / "data")
+            self.assertEqual(d.cache_dir, root / "cache")
+            self.assertEqual(d.download_dir, root / "dl")
+            self.assertFalse(d.art_enabled)
+            self.assertIs(d.mpv, stub_mpv)
+            self.assertIs(d.dl_manager, stub_dl)
+            self.assertEqual(d.active_tab, "queue")
+            self.assertEqual(d.active_modal, "")
+            self.assertEqual(d._entity_groups, {})
+            self.assertEqual(d.last_layout, {})
+
+    def test_queue_split_autoloads_lyrics_and_art_size_parity(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            stub_mpv = unittest.mock.Mock()
+            stub_mpv.batch_get.return_value = {
+                "idle-active": False,
+                "path": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "media-title": "To the Bone",
+                "metadata": {"artist": "Pamungkas", "album": "Walk the Talk"},
+                "duration": 225.0,
+            }
+            d = tui.SovereignDashboard(
+                stdscr=None,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=True,
+                mpv=stub_mpv,
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.data_dir.mkdir(parents=True, exist_ok=True)
+            d.active_tab = "queue"
+            d.right_tab = "upnext"
+            d.last_layout = tui.compute_rmpc_layout(40, 140, "auto", True, active_tab="queue")
+            expected_art = tui.calc_queue_art_size(d.last_layout["art"])
+            self.assertIsNotNone(expected_art)
+            self.assertNotEqual(expected_art, (22, 10))
+            self.assertTrue(d.is_lyrics_visible())
+
+            fetched_lyrics: list[tuple[str, str, str, float]] = []
+            fetched_art: list[tuple[str, int, int]] = []
+            d.fetch_lyrics_async = lambda t, p, artist="", duration=0.0: fetched_lyrics.append((t, p, artist, duration))  # type: ignore[method-assign]
+            d.ensure_art_async = lambda vid, tw, th: fetched_art.append((vid, tw, th))  # type: ignore[method-assign]
+
+            d.poll_mpv()
+            self.assertEqual(
+                fetched_lyrics,
+                [("To the Bone", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "Pamungkas", 225.0)],
+            )
+            self.assertEqual(fetched_art, [("dQw4w9WgXcQ", expected_art[0], expected_art[1])])
+
+            d.last_layout = tui.compute_rmpc_layout(40, 140, "auto", True, active_tab="local")
+            d.active_tab = "local"
+            self.assertFalse(d.is_lyrics_visible())
+            self.assertIsNone(tui.calc_queue_art_size(d.last_layout["art"]))
+
+    def test_dl_sel_dl_all_entity_groups_and_multi_ref_resolver(self):
+        self.assertEqual(tui.classify_row("eart:Pamungkas", "[E-ART]"), "entity_group")
+        self.assertEqual(tui.classify_row("lart:Pamungkas", "[L-ART]"), "local_group")
+        self.assertEqual(tui.classify_row("pl:chill", "[PL]"), "playlist")
+        self.assertEqual(tui.classify_row("deezer:album:12", "[ALB]"), "catalog_container")
+        self.assertEqual(tui.classify_row("deezer:song:34", "[DEEZER]"), "catalog_track")
+        self.assertEqual(tui.classify_row("dQw4w9WgXcQ", "[Q]"), "queue_item")
+        self.assertEqual(tui.classify_row("/tmp/song.flac", "[LOC]"), "local_file")
+        self.assertEqual(tui.classify_row("dQw4w9WgXcQ", "[YTM]"), "track")
+
+        self.assertFalse(tui.is_downloadable_ref("eart:Pamungkas", "[E-ART]"))
+        self.assertFalse(tui.is_downloadable_ref("/tmp/song.flac", "[LOC]"))
+        self.assertTrue(tui.is_downloadable_ref("dQw4w9WgXcQ", "[FAV]"))
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            started: list[tuple[list[str], str]] = []
+            stub_dl = unittest.mock.Mock()
+            stub_dl.start.side_effect = lambda args, label="": started.append((list(args), label)) or "dlm-1"
+
+            d = tui.SovereignDashboard(
+                stdscr=None,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=stub_dl,
+            )
+            d.last_layout = tui.compute_rmpc_layout(40, 140, "auto", True, active_tab="artists")
+            d._entity_groups = {
+                "eart:Pamungkas": [
+                    ("/tmp/local.flac", "Local Song", "Pamungkas", "[LOC]"),
+                    ("dQw4w9WgXcQ", "Song 1", "Pamungkas", "[FAV]"),
+                    ("abcDEF12345", "Song 2", "Pamungkas", "[HIS]"),
+                ],
+                "eart:LocalOnly": [
+                    ("/tmp/only.flac", "Only Local", "LocalOnly", "[LOC]"),
+                ],
+            }
+            d.tracks = [
+                ("eart:Pamungkas", "Pamungkas", "3 tracks", "[E-ART]"),
+                ("eart:LocalOnly", "LocalOnly", "1 tracks", "[E-ART]"),
+            ]
+            d.selected_idx = 0
+            d.handle_action("dl_sel", None)
+            self.assertEqual(started, [(["dQw4w9WgXcQ", "abcDEF12345"], "Pamungkas")])
+            self.assertIn("2 track(s)", d.toast_msg)
+
+            started.clear()
+            d.selected_idx = 1
+            d.handle_action("dl_sel", None)
+            self.assertEqual(started, [])
+            self.assertEqual(d.toast_msg, "Already local")
+
+            # Drill into eart:Pamungkas and press W (dl_all) when drawer is None -> opens downloads modal + toast
+            d.selected_idx = 0
+            d.play_selected()
+            d.handle_action("dl_all", None)
+            self.assertEqual(started, [(["dQw4w9WgXcQ", "abcDEF12345"], "Pamungkas")])
+            self.assertEqual(d.right_tab, "downloads")
+            self.assertEqual(d.active_modal, "downloads")
+            self.assertIn("2 track(s)", d.toast_msg)
+
+            resolved = downloader_mod.resolve_download_targets(["dQw4w9WgXcQ", "abcDEF12345"], d.data_dir, "/tmp/unused.sock")
+            self.assertEqual([t["id"] for t in resolved], ["dQw4w9WgXcQ", "abcDEF12345"])
+
+    def test_help_modal_fits_24x80_without_vertical_or_horizontal_clip(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h, self.w = h, w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            scr = RecordingStdscr(24, 80)
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.show_help = True
+            d.render()
+            for wy, wx, wtxt in scr.writes:
+                self.assertGreaterEqual(wy, 0)
+                self.assertLess(wy, 24)
+                self.assertGreaterEqual(wx, 0)
+                self.assertLessEqual(wx + tui.display_width(wtxt), 80, f"overflow: {wy},{wx} {wtxt!r}")
+            help_text = "\n".join(txt for _y, _x, txt in scr.writes)
+            self.assertIn("HYBRID RMPC", help_text)
+            self.assertIn("J/K  o u Q e N A m ? q", help_text)
 
 
 if __name__ == "__main__":
