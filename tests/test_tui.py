@@ -2521,5 +2521,154 @@ class TestHardening(unittest.TestCase):
             self.assertEqual(lines[2]["url"], "https://www.youtube.com/watch?v=ytmWatch123")
 
 
+class TestWP4ARmpcFrameAndWidgets(unittest.TestCase):
+    def _make_dash(self, td: Path) -> tui.SovereignDashboard:
+        return TestWP3AdaptiveHybridTui()._make_dash(td)
+
+    def test_tui_widgets_exports_and_helpers(self):
+        widgets_path = Path(__file__).resolve().parent.parent / "lib" / "tui_widgets.py"
+        mod = sys.modules["tui_widgets"]
+        self.assertIsNotNone(mod.__file__)
+        assert mod.__file__ is not None
+        self.assertEqual(Path(mod.__file__).resolve(), widgets_path.resolve())
+
+        self.assertIs(tui.compute_rmpc_layout, mod.compute_rmpc_layout)
+        self.assertIs(tui.compute_layout, mod.compute_layout)
+        self.assertIs(tui.Hitbox, mod.Hitbox)
+        self.assertEqual(len(mod.RMPC_TABS), 8)
+
+        self.assertEqual(mod.format_queue_summary([]), "0 songs")
+        self.assertEqual(mod.format_queue_summary([{"duration": 185}]), "1 song / 03:05 total time")
+        self.assertEqual(mod.format_queue_summary([{"duration": 60}, {"duration": 90}]), "2 songs / 02:30 total time")
+
+        s_left, s_thumb, s_right = mod.build_volume_slider(50, 11)
+        self.assertEqual(len(s_left) + len(s_thumb) + len(s_right), 11)
+        self.assertEqual(s_thumb, "●")
+
+        p_fill, p_empty = mod.build_progress_bar(30, 120, 20)
+        self.assertEqual(len(p_fill) + len(p_empty), 20)
+        self.assertEqual(p_fill, "█" * 5)
+        self.assertEqual(mod.build_progress_bar(0, 0, 10), ("", "─" * 10))
+
+    def test_rmpc_layout_matrix_bounds_and_non_overlap(self):
+        sizes = [
+            (12, 44),
+            (15, 60),
+            (17, 79),
+            (18, 80),
+            (18, 88),
+            (24, 80),
+            (24, 100),
+            (40, 140),
+            (60, 200),
+        ]
+        for h, w in sizes:
+            for mode in tui.LAYOUT_MODES:
+                for show_drawer in (True, False):
+                    for search_bar in (True, False):
+                        lay = tui.compute_rmpc_layout(h, w, mode, show_drawer, search_bar=search_bar)
+                        self.assertEqual(lay["compact"], h < 18)
+                        hboxes = lay["header_boxes"]
+                        if not lay["compact"]:
+                            self.assertIsNotNone(hboxes["left"])
+                            self.assertIsNotNone(hboxes["right"])
+                            if w >= 80:
+                                self.assertIsNotNone(hboxes["center"])
+                            else:
+                                self.assertIsNone(hboxes["center"])
+
+                        sibling_groups = [
+                            [b for b in (hboxes["left"], hboxes["center"], hboxes["right"]) if b is not None],
+                            [lay["footer_mode"], lay["footer_progress"]],
+                            [r for r in (lay["header"], lay["tabs"], lay["search_bar"], lay["list"], lay["drawer"], lay["footer"]) if r is not None],
+                        ]
+                        for rects in sibling_groups:
+                            for y0, rh, x0, rw in rects:
+                                self.assertGreaterEqual(y0, 0)
+                                self.assertLessEqual(y0 + rh, h)
+                                self.assertGreaterEqual(x0, 0)
+                                self.assertLessEqual(x0 + rw, w)
+                                self.assertGreater(rh, 0)
+                                self.assertGreater(rw, 0)
+                            for i in range(len(rects)):
+                                y1, h1, x1, w1 = rects[i]
+                                for j in range(i + 1, len(rects)):
+                                    y2, h2, x2, w2 = rects[j]
+                                    x_ov = x1 < (x2 + w2) and x2 < (x1 + w1)
+                                    y_ov = y1 < (y2 + h2) and y2 < (y1 + h1)
+                                    self.assertFalse(x_ov and y_ov, f"overlap at {h}x{w} mode={mode}")
+                        self.assertGreaterEqual(lay["list"][1], 4)
+
+    def test_rmpc_chrome_render_hitboxes_and_tab_navigation(self):
+        class RecordingStdscr:
+            def __init__(self, h: int, w: int) -> None:
+                self.h = h
+                self.w = w
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            d = self._make_dash(Path(td))
+            d.mpv_state = {
+                "idle-active": False,
+                "pause": False,
+                "media-title": "To the Bone",
+                "metadata": {"artist": "Pamungkas", "album": "Walk the Talk", "date": "2018"},
+                "time-pos": 65.0,
+                "duration": 225.0,
+                "volume": 80,
+                "mute": False,
+                "audio-codec-name": "opus",
+                "audio-params/samplerate": 48000,
+                "playlist": [{"title": "To the Bone", "duration": 225.0, "current": True}],
+            }
+            d.tracks = [("id1", "To the Bone", "Pamungkas • 3:45", "[Q]")]
+
+            for h, w in ((40, 140), (24, 72), (12, 44)):
+                scr = RecordingStdscr(h, w)
+                d.stdscr = scr
+                d.active_tab = "queue"
+                d.render()
+                for wy, wx, wtxt in scr.writes:
+                    self.assertGreaterEqual(wy, 0)
+                    self.assertLess(wy, h)
+                    self.assertGreaterEqual(wx, 0)
+                    self.assertLessEqual(wx + tui.display_width(wtxt), w, f"overflow at {h}x{w}: y={wy} x={wx} txt={wtxt!r}")
+
+                actions = {hb.action for hb in d.hitboxes}
+                self.assertIn("toggle", actions)
+                self.assertIn("seek_bar", actions)
+                self.assertIn("help", actions)
+                tab_payloads = {hb.payload for hb in d.hitboxes if hb.action == "tab"}
+                self.assertEqual(tab_payloads, {k for k, _ in tui.RMPC_TABS})
+                if h >= 18:
+                    self.assertIn("vol_bar", actions)
+                    for flag_act in ("loop", "shuffle", "eq", "norm", "autoplay", "mute"):
+                        self.assertIn(flag_act, actions)
+
+            # Keyboard 1-8 + Tab/Shift-Tab on list focus, and / switches to search
+            d.focus_pane = "list"
+            d.handle_key("8")
+            self.assertEqual(d.active_tab, "lyrics")
+            d.handle_key(9)
+            self.assertEqual(d.active_tab, "queue")
+            d.handle_key(getattr(tui.curses, "KEY_BTAB", 353))
+            self.assertEqual(d.active_tab, "lyrics")
+            d.handle_key("/")
+            self.assertEqual(d.active_tab, "search")
+            self.assertTrue(d.search_focus)
+
+
 if __name__ == "__main__":
     unittest.main()
