@@ -45,22 +45,18 @@ from tui_widgets import (
     LAYOUT_MODES,
     RMPC_TABS,
     SGR_RE,
-    WAVE_BARS,
     Hitbox,
     aggregate_albums,
     aggregate_artists,
     apply_search_key,
     build_context_hints,
-    build_lightweight_wave,
     build_progress_bar,
     build_vertical_scrollbar,
     build_volume_slider,
-    calc_art_size,
     calc_queue_art_size,
     calc_seek_target,
     calc_vol_target,
     classify_row,
-    compute_layout,
     compute_rmpc_layout,
     compute_table_col_widths,
     display_width,
@@ -68,6 +64,7 @@ from tui_widgets import (
     extract_album_from_meta,
     format_album_line,
     format_audio_badge,
+    format_header_title,
     format_queue_summary,
     format_table_header,
     format_table_row_4col,
@@ -1226,11 +1223,13 @@ class SovereignDashboard:
         spd_lbl = format_speed(self.mpv_state.get("speed"))
         q_lbl = str(getattr(self, "quality_mode", "cd") or "cd").upper()
 
-        title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "")
-        if idle or not title:
-            title = "No Song"
         mf = extract_metadata_fields(self.mpv_state.get("metadata"))
         artist = mf.get("artist") or ""
+        raw_title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "")
+        if idle or not raw_title:
+            title = "No Song"
+        else:
+            title = format_header_title(raw_title, artist) or raw_title
         album = format_album_line(mf.get("album", ""), mf.get("year", 0))
         sub_line = "No active playback" if idle else (" - ".join([p for p in (artist, album) if p]) or "Unknown")
         vol = max(0, min(100, int(round(float(self.mpv_state.get("volume") or 100)))))

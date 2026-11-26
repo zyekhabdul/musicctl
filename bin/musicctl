@@ -1616,62 +1616,6 @@ fetch_validated_provider_audio() {
   run_providers_py fetch-validated "$eff_q" "$id" "$title" "$artist" "$album" "$dur_s" "$tmp_dir" "$isrc" "$track_num" "$year"
 }
 
-embed_metadata_cover() {
-  local src_file="$1" out_file="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}" track_num="${7:-0}" year="${8:-0}" isrc="${9:-}"
-  command -v ffmpeg >/dev/null 2>&1 || { cp -f "$src_file" "$out_file"; return 0; }
-  local ext="${out_file##*.}"
-  ext="${ext,,}"
-  local -a cmd=(ffmpeg -y -v error -i "$src_file")
-  local has_cover=0
-  if [[ -n "$cover_file" && -s "$cover_file" && "$ext" != "opus" && "$ext" != "ogg" ]]; then
-    has_cover=1
-    cmd+=(-i "$cover_file" -map 0:a -map 1:v -c copy -disposition:v attached_pic)
-  else
-    cmd+=(-map 0:a -c:a copy)
-  fi
-  [[ -n "$title" ]] && cmd+=(-metadata "title=$title")
-  [[ -n "$artist" ]] && cmd+=(-metadata "artist=$artist")
-  [[ -n "$album" ]] && cmd+=(-metadata "album=$album")
-  [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && cmd+=(-metadata "track=$track_num")
-  [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && cmd+=(-metadata "date=$year")
-  [[ -n "$isrc" ]] && cmd+=(-metadata "isrc=$isrc")
-  cmd+=("$out_file")
-  if ! "${cmd[@]}" 2>/dev/null; then
-    if ((has_cover == 1)); then
-      local -a fb_cmd=(ffmpeg -y -v error -i "$src_file" -map 0:a -c:a copy)
-      [[ -n "$title" ]] && fb_cmd+=(-metadata "title=$title")
-      [[ -n "$artist" ]] && fb_cmd+=(-metadata "artist=$artist")
-      [[ -n "$album" ]] && fb_cmd+=(-metadata "album=$album")
-      [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && fb_cmd+=(-metadata "track=$track_num")
-      [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && fb_cmd+=(-metadata "date=$year")
-      [[ -n "$isrc" ]] && fb_cmd+=(-metadata "isrc=$isrc")
-      fb_cmd+=("$out_file")
-      "${fb_cmd[@]}" 2>/dev/null || cp -f "$src_file" "$out_file"
-    else
-      cp -f "$src_file" "$out_file"
-    fi
-  fi
-}
-
-transcode_small_audio() {
-  local src_file="$1" out_m4a="$2" title="$3" artist="$4" album="$5" cover_file="${6:-}" track_num="${7:-0}" year="${8:-0}" isrc="${9:-}"
-  command -v ffmpeg >/dev/null 2>&1 || return 1
-  local -a cmd=(ffmpeg -y -v error -i "$src_file")
-  if [[ -n "$cover_file" && -s "$cover_file" ]]; then
-    cmd+=(-i "$cover_file" -map 0:a -map 1:v -c:a aac -b:a 128k -c:v copy -disposition:v attached_pic)
-  else
-    cmd+=(-map 0:a -c:a aac -b:a 128k)
-  fi
-  [[ -n "$title" ]] && cmd+=(-metadata "title=$title")
-  [[ -n "$artist" ]] && cmd+=(-metadata "artist=$artist")
-  [[ -n "$album" ]] && cmd+=(-metadata "album=$album")
-  [[ "$track_num" =~ ^[1-9][0-9]*$ ]] && cmd+=(-metadata "track=$track_num")
-  [[ "$year" =~ ^[1-9][0-9]{3}$ ]] && cmd+=(-metadata "date=$year")
-  [[ -n "$isrc" ]] && cmd+=(-metadata "isrc=$isrc")
-  cmd+=(-movflags +faststart "$out_m4a")
-  "${cmd[@]}" 2>/dev/null
-}
-
 cmd_mute() {
   ensure_daemon
   mpv_cmd '["cycle", "mute"]' >/dev/null
@@ -2257,45 +2201,6 @@ ext_for_codec() {
     pcm*)       printf 'wav' ;;
     *)          printf 'm4a' ;;
   esac
-}
-
-sanitize_filename() {
-  printf '%s' "$1" | tr '/\0\t\r\n' '     ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
-}
-
-ensure_cover_file() {
-  local id="$1"
-  local cover_url="${2:-}"
-  init_storage
-  local safe_id="${id//[^A-Za-z0-9_-]/_}"
-  [[ -n "$safe_id" ]] || return 1
-  local art_file="$CACHE_ART_DIR/${safe_id}.jpg"
-  if [[ -n "$cover_url" ]]; then
-    if [[ ! -s "$art_file" ]]; then
-      local tmp
-      tmp="$(mktemp "$CACHE_ART_DIR/art.XXXXXX")"
-      if curl -sSL -m 5 -o "$tmp" "$cover_url" 2>/dev/null && [[ -s "$tmp" ]]; then
-        mv -f "$tmp" "$art_file"
-      else
-        rm -f "$tmp"
-        return 1
-      fi
-    fi
-    printf '%s' "$art_file"
-    return 0
-  fi
-  [[ "$id" =~ ^[A-Za-z0-9_-]{11}$ ]] || return 1
-  if [[ ! -s "$art_file" ]]; then
-    local tmp
-    tmp="$(mktemp "$CACHE_ART_DIR/art.XXXXXX")"
-    if curl -sSL -m 3 -o "$tmp" "https://i.ytimg.com/vi/${id}/hqdefault.jpg" 2>/dev/null && [[ -s "$tmp" ]]; then
-      mv -f "$tmp" "$art_file"
-    else
-      rm -f "$tmp"
-      return 1
-    fi
-  fi
-  printf '%s' "$art_file"
 }
 
 cmd_download() {
@@ -3198,9 +3103,6 @@ main() {
       ;;
     _validate_audio)
       validate_audio_file "$@"
-      ;;
-    _embed_metadata_cover)
-      embed_metadata_cover "$@"
       ;;
     _format_mmss)
       format_mmss "$@"
