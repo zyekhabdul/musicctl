@@ -6,7 +6,6 @@ from __future__ import annotations
 import curses
 import dataclasses
 import json
-import math
 import re
 import sys
 import unicodedata
@@ -17,10 +16,9 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
-from common import VIDEO_ID_RE, format_mmss
+from common import VIDEO_ID_RE, format_mmss, normalize_track_title, parse_meta_fields
 
 SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
-WAVE_BARS = "▁▂▃▄▅▆▇█"
 LAYOUT_MODES = ("auto", "split", "stacked", "focus")
 
 RMPC_TABS = [
@@ -46,64 +44,6 @@ class Hitbox:
 
     def contains(self, x: int, y: int) -> bool:
         return self.x0 <= x < self.x1 and self.y0 <= y < self.y1
-
-
-def compute_layout(h: int, w: int, mode: str = "auto", show_drawer: bool = True) -> dict[str, Any]:
-    """Compute adaptive pane rectangles (y0, h, x0, w) for split, stacked, or focus modes."""
-    mid_y = 2
-    deck_h = 4
-    mid_h = max(4, h - mid_y - deck_h)
-    req_mode = mode if mode in LAYOUT_MODES else "auto"
-
-    if req_mode == "focus" or not show_drawer:
-        eff = "focus"
-        if mid_h >= 14:
-            np_rect = (mid_y, 5, 0, w)
-            list_rect = (mid_y + 5, mid_h - 5, 0, w)
-        else:
-            np_rect = None
-            list_rect = (mid_y, mid_h, 0, w)
-        return {"effective": eff, "list": list_rect, "now_playing": np_rect, "drawer": None}
-
-    use_split = req_mode == "split" or (req_mode == "auto" and w >= 110 and w >= int(h * 2.1))
-    if use_split and w >= 64:
-        eff = "split"
-        left_w = max(36, min(w - 28, int(w * 0.58)))
-        right_w = w - left_w
-        if mid_h < 8:
-            return {
-                "effective": eff,
-                "list": (mid_y, mid_h, 0, left_w),
-                "now_playing": (mid_y, mid_h, left_w, right_w),
-                "drawer": None,
-            }
-        min_top = 8 if mid_h >= 12 else 4
-        top_h = min(15, mid_h - 4, max(min_top, int(mid_h * 0.36)))
-        bot_h = mid_h - top_h
-        return {
-            "effective": eff,
-            "list": (mid_y, mid_h, 0, left_w),
-            "now_playing": (mid_y, top_h, left_w, right_w),
-            "drawer": (mid_y + top_h, bot_h, left_w, right_w),
-        }
-
-    eff = "stacked"
-    if mid_h < 9:
-        return {
-            "effective": eff,
-            "list": (mid_y, mid_h, 0, w),
-            "now_playing": None,
-            "drawer": None,
-        }
-    np_h = 9 if mid_h >= 28 else (7 if mid_h >= 18 else 5)
-    dr_h = max(6, min(14, int(mid_h * 0.28))) if mid_h >= 16 else 0
-    list_h = mid_h - np_h - dr_h
-    return {
-        "effective": eff,
-        "list": (mid_y + np_h, list_h, 0, w),
-        "now_playing": (mid_y, np_h, 0, w),
-        "drawer": (mid_y + np_h + list_h, dr_h, 0, w) if dr_h > 0 else None,
-    }
 
 
 def compute_rmpc_layout(
@@ -234,31 +174,13 @@ def compute_rmpc_layout(
     }
 
 
-_DUR_TOKEN_RE = re.compile(r"^\d+:\d{2}(?::\d{2})?$")
-_META_NOISE = {"Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"}
-
-
 def parse_track_columns(title: str, meta: str, tag: str = "") -> tuple[str, str, str, str]:
     """Extract (artist, clean_title, album, duration) from row fields."""
     clean_title = (title or "").strip()
-    artist = ""
-    album = ""
-    duration = ""
-    extra: list[str] = []
-
-    for part in (meta or "").split("•"):
-        tok = part.strip()
-        if not tok or tok in _META_NOISE or re.match(r"^#\d+$", tok):
-            continue
-        if not duration and _DUR_TOKEN_RE.match(tok):
-            duration = tok
-            continue
-        extra.append(tok)
-
-    if extra:
-        artist = extra[0]
-        if len(extra) >= 2:
-            album = extra[1]
+    fields = parse_meta_fields(meta)
+    artist = fields["artist"]
+    album = fields["album"]
+    duration = fields["duration_str"]
 
     if not artist and " - " in clean_title:
         left, right = clean_title.split(" - ", 1)
@@ -397,30 +319,6 @@ def build_progress_bar(pos: float, dur: float, bar_w: int) -> tuple[str, str]:
     return ("█" * fill_w, " " * (bar_w - fill_w))
 
 
-def build_lightweight_wave(width: int, tick: int, paused: bool) -> str:
-    """Build lightweight stdlib full-width audio pulse bar matching card width."""
-    if width <= 0:
-        return ""
-    if paused:
-        return "▁" * width
-    out: list[str] = []
-    n_bars = len(WAVE_BARS) - 1
-    for i in range(width):
-        v = 0.55 * math.sin(tick * 0.45 + i * 0.35) + 0.45 * math.cos(tick * 0.25 - i * 0.22)
-        level = int(round(((v + 1.0) * 0.5) * n_bars))
-        out.append(WAVE_BARS[max(0, min(n_bars, level))])
-    return "".join(out)
-
-
-def calc_art_size(card_h: int, card_w: int) -> tuple[int, int] | None:
-    """Scale chafa symbol art dimensions to fit NOW PLAYING card safely."""
-    if card_h < 6 or card_w < 44:
-        return None
-    art_h = max(4, min(11, card_h - 2))
-    art_w = min(26, max(10, art_h * 2 + 2), max(10, card_w // 3))
-    return art_w, art_h
-
-
 def is_placeholder_title(title: str, vid: str = "") -> bool:
     """Return True when mpv media-title is still an unresolved URL or video ID placeholder."""
     t = (title or "").strip()
@@ -464,17 +362,22 @@ def format_album_line(album: str, year: int = 0) -> str:
     return f"{alb} ({year})" if year > 0 else alb
 
 
+def format_header_title(raw_title: str, artist: str = "") -> str:
+    """Normalize header title by removing noise tags and redundant leading artist prefix."""
+    cleaned = normalize_track_title(raw_title)
+    if not cleaned:
+        return ""
+    art = (artist or "").strip()
+    if art:
+        m = re.match(rf"^{re.escape(art)}\s*[-–—]\s+(.+)$", cleaned, re.IGNORECASE)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    return cleaned
+
+
 def extract_album_from_meta(meta: str) -> str:
     """Extract album name from bullet-delimited track metadata string."""
-    parts = [p.strip() for p in (meta or "").split("•") if p.strip()]
-    if len(parts) < 2 or parts[0] in ("Album", "Single", "EP", "Playlist", "Artist"):
-        return ""
-    cand = parts[1]
-    if re.match(r"^\d+:\d{2}(?::\d{2})?$", cand) or re.match(r"^(?:19|20)\d{2}$", cand):
-        return ""
-    if cand in ("Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"):
-        return ""
-    return cand
+    return parse_meta_fields(meta)["album"]
 
 
 def calc_seek_target(rel_x: int, bar_width: int, duration: float) -> float:
