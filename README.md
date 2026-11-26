@@ -37,12 +37,13 @@ Arch Linux PKGBUILD is provided in [packaging/arch/PKGBUILD](packaging/arch/PKGB
 
 ## Dependencies
 
-- **Core**: `bash`, `mpv`, `yt-dlp`, `fzf`, `curl`, `jq`, `python3`
+- **Core**: `bash`, `mpv`, `yt-dlp`, `curl`, `jq`, `python3`
 - **Optional**:
   - `chafa`: terminal album art preview inside TUI cockpit
   - `ffmpeg` (`ffprobe`): lossless provider integrity validation, `small` transcode, and metadata/cover embedding
   - `notify-send` (`libnotify`): track change desktop notifications
   - `mpv-mpris`: native MPRIS media key & lockscreen integration (`playerctl`)
+  - `fzf`: legacy deprecated `musicctl fzf` cockpit (scheduled for removal in `v3.0`)
 
 Run `musicctl doctor` to verify dependencies, MPRIS detection, daemon state, and cache usage.
 
@@ -51,7 +52,7 @@ Run `musicctl doctor` to verify dependencies, MPRIS detection, daemon state, and
 ```bash
 musicctl                        # Launch clickable realtime Sovereign Dashboard
 musicctl tui "pamungkas"        # Launch Dashboard preloaded with YTM search
-musicctl fzf [query]            # Launch legacy fzf cockpit (1s realtime ticker)
+musicctl fzf [query]            # [DEPRECATED, v3.0 removal] Launch legacy fzf cockpit
 musicctl play "to the bone"     # Search YTM / catalog ref / local file / URL and play
 musicctl add "one only"         # Append top match / album / playlist ref to mpv queue
 musicctl search [--catalog S] [--type T] "lofi"  # Search ytm|deezer|itunes (songs|albums|artists|playlists)
@@ -112,7 +113,7 @@ musicctl stop                   # Save session and stop background mpv daemon
 | `.` or `+` / `,` or `-`, `[` / `]` | Volume `+5%` / `-5%`, Seek `-10s` / `+10s` |
 | `?` / `q` | Toggle help modal / Quit TUI (daemon stays alive) |
 
-### Legacy fzf Cockpit (`musicctl fzf`)
+### Legacy fzf Cockpit (`musicctl fzf`, Deprecated — Removed in v3.0)
 
 | Key | Action |
 | --- | --- |

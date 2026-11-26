@@ -3,14 +3,13 @@
 pkgname=musicctl
 pkgver=2.4.0
 pkgrel=1
-pkgdesc="Lightweight standalone YouTube Music CLI & TUI player (mpv + yt-dlp + fzf)"
+pkgdesc="Lightweight standalone YouTube Music CLI & TUI player (mpv + yt-dlp)"
 arch=('any')
 url="https://github.com/zyekhabdul/musicctl"
 license=('MIT')
 depends=(
     'bash'
     'curl'
-    'fzf'
     'jq'
     'mpv'
     'python'
@@ -19,6 +18,7 @@ depends=(
 optdepends=(
     'chafa: Terminal album art preview'
     'ffmpeg: Audio probe validation, transcoding, and metadata/cover embedding'
+    'fzf: Legacy deprecated fzf cockpit (musicctl fzf)'
     'libnotify: Desktop track notifications'
     'mpv-mpris: Native MPRIS media keys integration'
 )

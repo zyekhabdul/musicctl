@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # musicctl - Lightweight Standalone YouTube Music CLI & TUI Player
-# Zero-Electron, ad-free audio streaming via InnerTube + yt-dlp + mpv IPC + fzf
+# Zero-Electron, ad-free audio streaming via InnerTube + yt-dlp + mpv IPC
 # ==============================================================================
 
 set -uo pipefail
@@ -953,10 +953,11 @@ load_track_target() {
   if cached="$(find_cached_audio "$id" 2>/dev/null)"; then
     target="$cached"
   else
-    local artist="" album="" dur_s="0"
-    artist="$(parse_meta_artist "$meta")"
-    album="$(parse_meta_album "$meta")"
-    dur_s="$(parse_meta_duration "$meta")"
+    local artist="" album="" dur_s="0" META_ARTIST="" META_ALBUM="" META_DURATION="0"
+    parse_meta_fields_into "$meta"
+    artist="$META_ARTIST"
+    album="$META_ALBUM"
+    dur_s="$META_DURATION"
     if prov_json="$(run_providers_py resolve-stream "$(quality_state_get)" "$id" "$title" "$artist" "$album" "$dur_s" 2>/dev/null)"; then
       prov_url="$(jq -r '.url // .manifest // empty' <<<"$prov_json" 2>/dev/null || true)"
       [[ -n "$prov_url" ]] && target="$prov_url"
@@ -1534,62 +1535,33 @@ cmd_quality() {
   esac
 }
 
+parse_meta_fields_into() {
+  local meta="${1:-}" out
+  out="$(run_common_py parse-meta "$meta" 2>/dev/null || printf '\n\n0\n')"
+  {
+    IFS= read -r META_ARTIST
+    IFS= read -r META_ALBUM
+    IFS= read -r META_DURATION
+  } <<<"$out"
+  META_DURATION="${META_DURATION:-0}"
+}
+
 parse_meta_duration() {
-  local meta="${1:-}"
-  if [[ "$meta" =~ ([0-9]+):([0-9]{2})([[:space:]]|$) ]]; then
-    local mins="${BASH_REMATCH[1]}" secs="${BASH_REMATCH[2]}"
-    printf '%d' "$((10#$mins * 60 + 10#$secs))"
-  else
-    printf '0'
-  fi
+  local META_ARTIST="" META_ALBUM="" META_DURATION="0"
+  parse_meta_fields_into "${1:-}"
+  printf '%s' "$META_DURATION"
 }
 
 parse_meta_artist() {
-  local meta="${1:-}" artist=""
-  if [[ "$meta" == *"•"* ]]; then
-    artist="${meta%%•*}"
-    artist="${artist#"${artist%%[![:space:]]*}"}"
-    artist="${artist%"${artist##*[![:space:]]}"}"
-  fi
-  case "$artist" in
-    ""|"Video ID"|"Direct URL"|"Local File"|"Local Audio"|"Now Playing"|"Album"|"Single"|"EP"|"Playlist"|"Artist") artist="" ;;
-  esac
-  printf '%s' "$artist"
+  local META_ARTIST="" META_ALBUM="" META_DURATION="0"
+  parse_meta_fields_into "${1:-}"
+  printf '%s' "$META_ARTIST"
 }
 
 parse_meta_album() {
-  local meta="${1:-}"
-  [[ "$meta" == *"•"* ]] || return 0
-  local -a parts=()
-  local rem="$meta" seg
-  while [[ "$rem" == *"•"* ]]; do
-    seg="${rem%%•*}"
-    seg="${seg#"${seg%%[![:space:]]*}"}"
-    seg="${seg%"${seg##*[![:space:]]}"}"
-    parts+=("$seg")
-    rem="${rem#*•}"
-  done
-  rem="${rem#"${rem%%[![:space:]]*}"}"
-  rem="${rem%"${rem##*[![:space:]]}"}"
-  parts+=("$rem")
-
-  ((${#parts[@]} >= 2)) || return 0
-  case "${parts[0]}" in
-    "Album"|"Single"|"EP"|"Playlist"|"Artist") return 0 ;;
-  esac
-  local cand="${parts[1]}"
-  if [[ -z "$cand" ]] \
-    || [[ "$cand" =~ ^[0-9]+:[0-9]{2}(:[0-9]{2})?$ ]] \
-    || [[ "$cand" =~ ^(19|20)[0-9]{2}$ ]] \
-    || [[ "$cand" =~ ^[0-9]+([.,][0-9]+)?[KkMmBbTt]?([[:space:]]+(plays?|views?|songs?|tracks?))?$ ]]; then
-    return 0
-  fi
-  case "$cand" in
-    "Video ID"|"Direct URL"|"Local File"|"Local Audio"|"Now Playing"|"Album"|"Single"|"EP"|"Playlist"|"Artist"|"Active"|"Queued")
-      return 0
-      ;;
-  esac
-  printf '%s' "$cand"
+  local META_ARTIST="" META_ALBUM="" META_DURATION="0"
+  parse_meta_fields_into "${1:-}"
+  printf '%s' "$META_ALBUM"
 }
 
 clean_track_title() {
@@ -1936,10 +1908,11 @@ PY
           ((skipped++))
           continue
         fi
-        local artist="" album="" dur_s="0" prov_saved=0 prov_res=""
-        artist="$(parse_meta_artist "$meta")"
-        album="$(parse_meta_album "$meta")"
-        dur_s="$(parse_meta_duration "$meta")"
+        local artist="" album="" dur_s="0" prov_saved=0 prov_res="" META_ARTIST="" META_ALBUM="" META_DURATION="0"
+        parse_meta_fields_into "$meta"
+        artist="$META_ARTIST"
+        album="$META_ALBUM"
+        dur_s="$META_DURATION"
         if prov_res="$(fetch_validated_provider_audio "$eff_q" "$id" "$title" "$artist" "$album" "$dur_s" "$CACHE_AUDIO_DIR")"; then
           local p_raw="" p_info="" _p_json="" p_codec p_ext
           {
@@ -2427,14 +2400,14 @@ render_album_art() {
 cmd_doctor() {
   printf '%s=== musicctl %s diagnostics ===%s\n' "$UI_CYAN" "$MUSICCTL_VERSION" "$UI_RST"
   local dep
-  for dep in mpv yt-dlp fzf jq curl python3; do
+  for dep in mpv yt-dlp jq curl python3; do
     if command -v "$dep" >/dev/null 2>&1; then
       printf '  %s[OK]%s   %-12s %s\n' "$UI_GREEN" "$UI_RST" "$dep" "$(command -v "$dep")"
     else
       printf '  %s[MISS]%s %-12s required\n' "$UI_RED" "$UI_RST" "$dep"
     fi
   done
-  for dep in chafa notify-send ffmpeg ffprobe; do
+  for dep in chafa notify-send ffmpeg ffprobe fzf; do
     if command -v "$dep" >/dev/null 2>&1; then
       printf '  %s[OK]%s   %-12s %s (optional)\n' "$UI_GREEN" "$UI_RST" "$dep" "$(command -v "$dep")"
     else
@@ -2917,7 +2890,8 @@ find_tui_script() {
 }
 
 cmd_fzf() {
-  command -v fzf >/dev/null 2>&1 || die "fzf is required for fzf mode"
+  printf '%s[WARN]%s musicctl fzf is deprecated and scheduled for removal in v3.0; use default '\''musicctl'\'' TUI instead.\n' "$UI_AMBER" "$UI_RST" >&2
+  command -v fzf >/dev/null 2>&1 || die "fzf is required for deprecated fzf mode"
   init_storage
   local initial_query="${*:-}"
   local initial_cmd
@@ -3024,7 +2998,7 @@ ${UI_CYAN}musicctl${UI_RST} v${MUSICCTL_VERSION} - Lightweight Standalone YouTub
 ${UI_BOLD}USAGE${UI_RST}
   musicctl                        Launch clickable realtime Sovereign Dashboard
   musicctl tui [query]            Launch Dashboard (optionally preloaded with YTM search)
-  musicctl fzf [query]            Launch legacy fzf cockpit (1s realtime ticker)
+  musicctl fzf [query]            [DEPRECATED] Launch legacy fzf cockpit (removal in v3.0)
   musicctl play <q|id|ref|url|f>  Resolve track, album/playlist ref, or file and play
   musicctl add <q|id|ref|url|f>   Resolve track, album/playlist ref, or file and enqueue
   musicctl search [--catalog S] [--type T] [--json] <query>

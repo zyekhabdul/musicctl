@@ -4,7 +4,7 @@ _musicctl() {
   local -a commands
   commands=(
     'tui:Launch interactive clickable Sovereign Dashboard'
-    'fzf:Launch legacy fzf TUI cockpit with realtime preview'
+    'fzf:[DEPRECATED] Launch legacy fzf TUI cockpit (removal in v3.0)'
     'play:Resolve track, album/playlist ref, or file and play'
     'add:Resolve track, album/playlist ref, or file and enqueue'
     'search:Search catalogs (ytm|deezer|itunes)'

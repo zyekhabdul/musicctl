@@ -87,7 +87,7 @@ echo "[OK] Completions -> ${BASH_COMP}, ${ZSH_COMP}"
 echo "[OK] Desktop entry -> ${DESKTOP_DST}"
 
 missing=()
-for dep in mpv yt-dlp fzf jq curl python3; do
+for dep in mpv yt-dlp jq curl python3; do
   command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
 done
 if ((${#missing[@]} > 0)); then
