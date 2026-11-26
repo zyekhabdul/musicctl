@@ -223,7 +223,7 @@ assert_ok "daemon socket cleaned up after extra args test" test ! -S "$MUSICCTL_
 
 # 10. Version, doctor, config precedence, synced lyrics JSON, and auto-cache resolution
 VER_OUT="$("$BIN" --version)"
-assert_contains "version prints 2.4.0" "$VER_OUT" "musicctl 2.4.0"
+assert_contains "version prints 2.4.1" "$VER_OUT" "musicctl 2.4.1"
 
 DOC_OUT="$("$BIN" doctor)"
 assert_contains "doctor checks mpv" "$DOC_OUT" "mpv"
