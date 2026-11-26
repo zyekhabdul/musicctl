@@ -461,19 +461,8 @@ def _ytm_format_for_quality(quality: str) -> str:
 
 
 def _parse_meta_fields(meta: str) -> tuple[str, str, int]:
-    parts = [p.strip() for p in (meta or "").split("•") if p.strip()]
-    artist = parts[0] if parts and parts[0] not in ("Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Album", "Playlist", "Artist") else ""
-    album = ""
-    dur = 0
-    for p in parts:
-        d = catalog.parse_duration_str(p)
-        if d > 0:
-            dur = d
-    if len(parts) >= 2 and parts[0] not in ("Album", "Playlist", "Artist"):
-        c = parts[1]
-        if catalog.parse_duration_str(c) == 0 and not re.match(r"^(?:19|20)\d{2}$", c) and c not in ("Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing"):
-            album = c
-    return artist, album, dur
+    parsed = common.parse_meta_fields(meta)
+    return parsed["artist"], parsed["album"], int(parsed["duration"])
 
 
 def _resolve_current_track(sock_path: str) -> dict[str, Any]:

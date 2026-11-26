@@ -18,9 +18,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-USER_AGENT = "musicctl/2.3"
+USER_AGENT = "musicctl/2.4"
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 TS_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
+META_ENTITY_KINDS = frozenset({"Album", "Single", "EP", "Playlist", "Artist"})
+META_NOISE_TOKENS = frozenset(
+    {"Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"}
+)
+_META_DUR_RE = re.compile(r"^(\d{1,3}):(\d{2})(?::(\d{2}))?$")
+_META_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
+_META_STATS_RE = re.compile(
+    r"^\d+(?:[.,]\d+)?[KkMmBbTt]?(?:\s+(?:plays?|views?|songs?|tracks?))?$",
+    re.IGNORECASE,
+)
+_META_QIDX_RE = re.compile(r"^#\d+$")
 
 STATUS_PROPS = [
     "idle-active",
@@ -94,6 +105,53 @@ def extract_video_id(value: str) -> str:
 
 def _norm_meta(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _parse_dur_secs(tok: str) -> int:
+    m = _META_DUR_RE.match((tok or "").strip())
+    if not m:
+        return 0
+    a, b, c = int(m.group(1)), int(m.group(2)), m.group(3)
+    if c is not None:
+        return a * 3600 + b * 60 + int(c)
+    return a * 60 + b
+
+
+def parse_meta_fields(meta: str) -> dict[str, Any]:
+    """Parse bullet-delimited track metadata string into {artist, album, duration, duration_str}."""
+    cleaned = re.sub(r"[\t\r\n]+", " ", str(meta or ""))
+    parts = [p.strip() for p in cleaned.split("•") if p.strip()]
+    is_entity = bool(parts and parts[0] in META_ENTITY_KINDS)
+
+    duration = 0
+    duration_str = ""
+    text_tokens: list[str] = []
+
+    for tok in parts:
+        if tok in META_NOISE_TOKENS or _META_QIDX_RE.match(tok):
+            continue
+        if _META_DUR_RE.match(tok):
+            if not duration_str:
+                duration_str = tok
+                duration = _parse_dur_secs(tok)
+            continue
+        if _META_YEAR_RE.match(tok) or _META_STATS_RE.match(tok):
+            continue
+        text_tokens.append(tok)
+
+    artist = ""
+    album = ""
+    if not is_entity and text_tokens:
+        artist = text_tokens[0]
+        if len(text_tokens) >= 2 and text_tokens[1] not in META_ENTITY_KINDS:
+            album = text_tokens[1]
+
+    return {
+        "artist": artist,
+        "album": album,
+        "duration": duration,
+        "duration_str": duration_str,
+    }
 
 
 def split_shell_args(raw: str) -> list[str]:
@@ -1186,6 +1244,11 @@ def main(argv: list[str] | None = None) -> int:
         toks = split_shell_args(raw)
         if toks:
             sys.stdout.write("\0".join(toks) + "\0")
+        return 0
+
+    if cmd == "parse-meta":
+        fields = parse_meta_fields(args[1] if len(args) >= 2 else "")
+        sys.stdout.write(f"{fields['artist']}\n{fields['album']}\n{fields['duration']}\n")
         return 0
 
     return 1

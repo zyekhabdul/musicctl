@@ -212,3 +212,11 @@
   4. *(Optional, requires user confirmation)*: Adapt `~/.config/yambar/mpris-bar.py` and `open-player.sh` if user wants `yambar` to track `musicctl` (`mpv-mpris`) alongside or instead of `ytm_player`.
 - **Definition of Done (DoD)**:
   - `make lint && make test-offline` exits `0` with full WP4 coverage and `~/.local/bin/musicctl --version` matches repo version.
+
+---
+
+## 5. Post-v2.4.0 Maintenance Pass
+
+- Track: Maintenance
+- **Status**: COMPLETED
+- **Scope**: Fix multi-artist YTM InnerTube album parsing (`lib/catalog.py`), normalize TUI header title (`lib/tui_widgets.py`, `lib/tui.py`), bump `USER_AGENT` (`lib/common.py`), remove WP3/bash dead helpers, consolidate 4 metadata parsers into `common.parse_meta_fields`, and deprecate `musicctl fzf` (demoting `fzf` to optional dependency).

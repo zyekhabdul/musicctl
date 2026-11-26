@@ -278,15 +278,6 @@ def _runs_text(node: Any) -> str:
     return ""
 
 
-def _runs_list(node: Any) -> list[str]:
-    if not isinstance(node, dict):
-        return []
-    runs = node.get("runs")
-    if not isinstance(runs, list):
-        return []
-    return [str(r.get("text") or "").strip() for r in runs if isinstance(r, dict) and str(r.get("text") or "").strip()]
-
-
 def _best_thumbnail_url(node: Any) -> str:
     if not isinstance(node, dict):
         return ""
@@ -327,7 +318,7 @@ def _extract_ytm_meta_tokens(runs: list[str]) -> tuple[list[str], int, int]:
     duration = 0
     for tok in runs:
         for piece in re.split(r"\s*[•·]\s*", tok):
-            p = piece.strip()
+            p = re.sub(r"\s+", " ", piece).strip()
             if not p:
                 continue
             if DURATION_RE.match(p):
@@ -419,11 +410,10 @@ def parse_ytm_search(data: Any, search_type: str = "songs") -> list[dict[str, An
             continue
         seen.add((etype, eid))
 
-        meta_runs = _runs_list(col1.get("text"))
-        tokens, year, dur = _extract_ytm_meta_tokens(meta_runs)
+        tokens, year, dur = _extract_ytm_meta_tokens([_runs_text(col1.get("text"))])
         if dur == 0 and len(flex) > 2:
             col2 = (flex[2] or {}).get("musicResponsiveListItemFlexColumnRenderer", {})
-            _, _, dur = _extract_ytm_meta_tokens(_runs_list(col2.get("text")))
+            _, _, dur = _extract_ytm_meta_tokens([_runs_text(col2.get("text"))])
 
         artist = ""
         album = ""
@@ -465,10 +455,10 @@ def _parse_ytm_browse_header(data: dict[str, Any], browse_id: str) -> dict[str, 
         if not isinstance(hdr, dict):
             continue
         title = _runs_text(hdr.get("title")) or browse_id
-        sub_runs = _runs_list(hdr.get("subtitle")) + _runs_list(hdr.get("straplineTextOne"))
-        tokens, year, _ = _extract_ytm_meta_tokens(sub_runs)
+        sub_texts = [_runs_text(hdr.get("subtitle")), _runs_text(hdr.get("straplineTextOne"))]
+        tokens, year, _ = _extract_ytm_meta_tokens(sub_texts)
         if year == 0:
-            _, year, _ = _extract_ytm_meta_tokens(_runs_list(hdr.get("secondSubtitle")))
+            _, year, _ = _extract_ytm_meta_tokens([_runs_text(hdr.get("secondSubtitle"))])
         artist = title if etype == "artist" else (tokens[0] if tokens else "")
         album = title if etype == "album" else ""
         cover = _best_thumbnail_url(hdr.get("thumbnail") or hdr.get("foregroundThumbnail"))
@@ -572,16 +562,16 @@ def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
             continue
         seen.add((etype, eid))
 
-        meta_runs = _runs_list(col1.get("text"))
+        meta_texts = [_runs_text(col1.get("text"))]
         if len(flex) > 2:
             col2 = (flex[2] or {}).get("musicResponsiveListItemFlexColumnRenderer", {})
-            meta_runs.extend(_runs_list(col2.get("text")))
-        tokens, year, dur = _extract_ytm_meta_tokens(meta_runs)
+            meta_texts.append(_runs_text(col2.get("text")))
+        tokens, year, dur = _extract_ytm_meta_tokens(meta_texts)
 
         if dur == 0:
             for fc in renderer.get("fixedColumns") or []:
                 fcr = (fc or {}).get("musicResponsiveListItemFixedColumnRenderer", {})
-                _, _, f_dur = _extract_ytm_meta_tokens(_runs_list(fcr.get("text")))
+                _, _, f_dur = _extract_ytm_meta_tokens([_runs_text(fcr.get("text"))])
                 if f_dur > 0:
                     dur = f_dur
                     break
@@ -629,7 +619,7 @@ def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
             continue
         seen.add((etype, eid))
 
-        tokens, year, dur = _extract_ytm_meta_tokens(_runs_list(card.get("subtitle")))
+        tokens, year, dur = _extract_ytm_meta_tokens([_runs_text(card.get("subtitle"))])
         artist = tokens[0] if tokens else hdr_artist
         cover = _best_thumbnail_url(card.get("thumbnailRenderer")) or hdr_cover
         items.append(
