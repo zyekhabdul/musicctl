@@ -121,8 +121,12 @@ def compute_rmpc_layout(
         tab_h = 2
         footer_h = 3
         if w >= 80:
-            left_w = min(35, max(22, w // 4))
-            right_w = min(35, max(22, w // 4))
+            left_w = min(32, max(22, int(w * 0.24)))
+            right_w = min(38, max(24, int(w * 0.32)))
+            if w - left_w - right_w < 20:
+                right_w = max(22, w - left_w - 20)
+                if w - left_w - right_w < 20:
+                    left_w = max(20, w - right_w - 20)
             center_w = w - left_w - right_w
             header_boxes: dict[str, tuple[int, int, int, int] | None] = {
                 "left": (0, header_h, 0, left_w),
@@ -165,6 +169,10 @@ def compute_rmpc_layout(
     if search_bar and ch >= 6:
         search_rect = (cy, 1, 0, w)
         cy += 1
+        ch -= 1
+    hint_rect: tuple[int, int, int, int] | None = None
+    if not compact and ch >= 7:
+        hint_rect = (fy - 1, 1, 0, w)
         ch -= 1
 
     content_rect = (cy, ch, 0, w)
@@ -218,6 +226,7 @@ def compute_rmpc_layout(
         "lyrics": lyrics_rect,
         "list": list_rect,
         "drawer": drawer_rect,
+        "hint_bar": hint_rect,
         "now_playing": None,
         "footer": footer_rect,
         "footer_mode": footer_mode,
@@ -806,3 +815,28 @@ def calc_queue_art_size(art_rect: tuple[int, int, int, int] | None) -> tuple[int
     th = min(14, in_h)
     tw = min(in_w, max(12, th * 2 + 2))
     return (tw, th)
+
+
+def build_context_hints(
+    active_tab: str,
+    *,
+    search_focus: bool = False,
+    active_modal: str = "",
+    has_nav: bool = False,
+    is_group_list: bool = False,
+) -> list[tuple[str, str]]:
+    """Return context-sensitive (key, label) hints for the bottom action strip."""
+    if search_focus:
+        return [("Enter", "Search"), ("Esc", "Done"), ("Ctrl-U", "Clear"), ("Tab", "Scope")]
+    if active_modal == "downloads":
+        return [("j/k", "Scroll"), ("X", "Cancel All"), ("Esc", "Close")]
+    if active_modal == "info":
+        return [("Enter", "Play"), ("a", "+Queue"), ("f", "Fav"), ("d", "DL"), ("r", "Radio"), ("Esc", "Close")]
+    if active_tab == "lyrics" and not has_nav:
+        return [("j/k", "Scroll"), ("Space", "Pause"), ("</>", "Prev/Next"), (",/.", "Vol"), ("?", "Help")]
+    if is_group_list:
+        return [("Enter", "Open"), ("a", "+Queue All"), ("d", "Download"), ("/", "Search"), ("Space", "Pause"), ("?", "Help")]
+    if active_tab == "queue" and not has_nav:
+        return [("Enter", "Jump"), ("J/K", "Move"), ("f", "Fav"), ("d", "DL"), ("r", "Radio"), ("I", "Info"), ("D", "DL Modal"), ("?", "Help")]
+    back_or_search = ("Bksp", "Back") if has_nav else ("/", "Search")
+    return [("Enter", "Play"), ("a", "+Queue"), ("f", "Fav"), ("d", "DL"), ("r", "Radio"), ("I", "Info"), back_or_search, ("?", "Help")]

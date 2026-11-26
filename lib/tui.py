@@ -50,6 +50,7 @@ from tui_widgets import (
     aggregate_albums,
     aggregate_artists,
     apply_search_key,
+    build_context_hints,
     build_lightweight_wave,
     build_progress_bar,
     build_vertical_scrollbar,
@@ -363,7 +364,7 @@ class SovereignDashboard:
             curses.init_pair(PAIR_PILL_ACTIVE, 232, 117)
             curses.init_pair(PAIR_PILL_BTN, 252, 236)
             curses.init_pair(PAIR_BAR_FILL, 117, -1)
-            curses.init_pair(PAIR_BAR_EMPTY, 239, -1)
+            curses.init_pair(PAIR_BAR_EMPTY, 243, -1)
             curses.init_pair(PAIR_LYRIC_ACTIVE, 117, -1)
             curses.init_pair(PAIR_TITLE, 255, -1)
             curses.init_pair(PAIR_INPUT, 255, 235)
@@ -1162,14 +1163,35 @@ class SovereignDashboard:
         if avail_w <= 6:
             return
         loop_m = self.get_loop_mode()
-        flags = [
-            ("o", "loop", loop_m != "off"),
-            ("u", "shuffle", False),
-            ("e", "eq", getattr(self, "eq_mode", "flat") != "flat"),
-            ("N", "norm", bool(getattr(self, "norm_on", False))),
-            ("A", "autoplay", bool(getattr(self, "autoplay_on", False))),
-            ("m", "mute", muted),
-        ]
+        if avail_w >= 34:
+            lp_lbl = "Loop:1" if loop_m == "one" else ("Loop:A" if loop_m == "all" else "Loop")
+            flags = [
+                (lp_lbl, "loop", loop_m != "off"),
+                ("Shuf", "shuffle", False),
+                ("EQ", "eq", getattr(self, "eq_mode", "flat") != "flat"),
+                ("Norm", "norm", bool(getattr(self, "norm_on", False))),
+                ("Auto", "autoplay", bool(getattr(self, "autoplay_on", False))),
+                ("Mute", "mute", muted),
+            ]
+        elif avail_w >= 23:
+            lp_lbl = "Lp:1" if loop_m == "one" else ("Lp:A" if loop_m == "all" else "Lp")
+            flags = [
+                (lp_lbl, "loop", loop_m != "off"),
+                ("Sh", "shuffle", False),
+                ("EQ", "eq", getattr(self, "eq_mode", "flat") != "flat"),
+                ("Nm", "norm", bool(getattr(self, "norm_on", False))),
+                ("Au", "autoplay", bool(getattr(self, "autoplay_on", False))),
+                ("Mt", "mute", muted),
+            ]
+        else:
+            flags = [
+                ("o", "loop", loop_m != "off"),
+                ("u", "shuffle", False),
+                ("e", "eq", getattr(self, "eq_mode", "flat") != "flat"),
+                ("N", "norm", bool(getattr(self, "norm_on", False))),
+                ("A", "autoplay", bool(getattr(self, "autoplay_on", False))),
+                ("m", "mute", muted),
+            ]
         help_btn = "[?]"
         fx = x0
         max_fx = x0 + avail_w - len(help_btn) - 1
@@ -1192,7 +1214,8 @@ class SovereignDashboard:
         boxes = layout["header_boxes"]
         idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
         paused = bool(self.mpv_state.get("pause", False))
-        badge = "[IDLE]" if idle else ("[PAUSE]" if paused else "[PLAY]")
+        badge = "[IDLE]" if idle else ("[|| PAUSE]" if paused else "[> PLAY]")
+        compact_badge = "[IDLE]" if idle else ("[PAUSE]" if paused else "[PLAY]")
         badge_pair = PAIR_DIM if idle else (PAIR_AMBER if paused else PAIR_GREEN)
         pos_s = format_mmss(float(self.mpv_state.get("time-pos") or 0.0))
         dur_s = format_mmss(float(self.mpv_state.get("duration") or 0.0))
@@ -1201,6 +1224,7 @@ class SovereignDashboard:
         sfmt = str(self.mpv_state.get("audio-params/format") or "")
         audio_badge = format_audio_badge(codec, srate, sfmt)
         spd_lbl = format_speed(self.mpv_state.get("speed"))
+        q_lbl = str(getattr(self, "quality_mode", "cd") or "cd").upper()
 
         title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "")
         if idle or not title:
@@ -1215,13 +1239,13 @@ class SovereignDashboard:
         if compact:
             _, _, _, hw = layout["header"]
             self.safe_addstr(0, 0, " " * hw, curses.color_pair(PAIR_PILL_BTN))
-            self.safe_addstr(0, 1, badge, curses.color_pair(badge_pair) | curses.A_BOLD)
-            self.add_hitbox(1, 0, 1 + len(badge), 1, "toggle", None)
+            self.safe_addstr(0, 1, compact_badge, curses.color_pair(badge_pair) | curses.A_BOLD)
+            self.add_hitbox(1, 0, 1 + len(compact_badge), 1, "toggle", None)
             help_btn = "[?]"
             vol_lbl = f"{vol:3d}%"
-            hx = max(2 + len(badge), hw - len(help_btn) - 1)
-            vx = max(2 + len(badge), hx - len(vol_lbl) - 1)
-            title_x = 2 + len(badge)
+            hx = max(2 + len(compact_badge), hw - len(help_btn) - 1)
+            vx = max(2 + len(compact_badge), hx - len(vol_lbl) - 1)
+            title_x = 2 + len(compact_badge)
             title_w = max(0, vx - title_x - 1)
             if title_w > 2:
                 summary_t = title if idle or not artist else f"{title} — {artist}"
@@ -1251,12 +1275,30 @@ class SovereignDashboard:
             self.safe_addstr(3, 0, bot_line, b_attr)
 
             l_in_w = max(1, lw - 2)
-            self.safe_addstr(1, 1, truncate_width(badge, l_in_w), curses.color_pair(badge_pair) | curses.A_BOLD)
-            self.add_hitbox(1, 1, min(lw, 1 + len(badge)), 2, "toggle", None)
-            if spd_lbl and l_in_w > len(badge) + len(spd_lbl) + 2:
-                self.safe_addstr(1, 2 + len(badge), spd_lbl, curses.color_pair(PAIR_AMBER))
-            elap = f"{pos_s} / {dur_s}" + (f" ({audio_badge})" if audio_badge else "")
-            self.safe_addstr(2, 1, truncate_width(elap, l_in_w), curses.color_pair(PAIR_CYAN))
+            tx_pos = 1
+            if l_in_w >= 19:
+                tx_pos = self.draw_button(1, tx_pos, "<", "prev", None)
+                b_txt = truncate_width(badge, max(1, lw - tx_pos - 5))
+                self.safe_addstr(1, tx_pos, b_txt, curses.color_pair(badge_pair) | curses.A_BOLD)
+                self.add_hitbox(tx_pos, 1, min(lw, tx_pos + len(b_txt)), 2, "toggle", None)
+                tx_pos += len(b_txt) + 1
+                if tx_pos + 3 < lw:
+                    tx_pos = self.draw_button(1, tx_pos, ">", "next", None)
+            else:
+                b_txt = truncate_width(compact_badge, l_in_w)
+                self.safe_addstr(1, 1, b_txt, curses.color_pair(badge_pair) | curses.A_BOLD)
+                self.add_hitbox(1, 1, min(lw, 1 + len(b_txt)), 2, "toggle", None)
+                tx_pos = 2 + len(b_txt)
+            if spd_lbl and tx_pos + len(spd_lbl) <= lw:
+                self.safe_addstr(1, tx_pos, spd_lbl, curses.color_pair(PAIR_AMBER))
+
+            if audio_badge:
+                l2 = f"{audio_badge} | {q_lbl}"
+            elif not idle:
+                l2 = f"{pos_s} / {dur_s} | {q_lbl}"
+            else:
+                l2 = f"Ready | Quality: {q_lbl}"
+            self.safe_addstr(2, 1, truncate_width(l2, l_in_w), curses.color_pair(PAIR_CYAN))
 
             c_in_w = max(1, cw - 2)
             t_disp = truncate_width(title, c_in_w)
@@ -1276,24 +1318,27 @@ class SovereignDashboard:
             self.safe_addstr(3, 0, bot_line, b_attr)
 
             l_in_w = max(1, lw - 2)
-            self.safe_addstr(1, 1, truncate_width(badge, l_in_w), curses.color_pair(badge_pair) | curses.A_BOLD)
-            self.add_hitbox(1, 1, min(lw, 1 + len(badge)), 2, "toggle", None)
-            rem_t = max(0, l_in_w - len(badge) - 1)
+            self.safe_addstr(1, 1, truncate_width(compact_badge, l_in_w), curses.color_pair(badge_pair) | curses.A_BOLD)
+            self.add_hitbox(1, 1, min(lw, 1 + len(compact_badge)), 2, "toggle", None)
+            rem_t = max(0, l_in_w - len(compact_badge) - 1)
             if rem_t > 1:
-                self.safe_addstr(1, 2 + len(badge), truncate_width(title, rem_t), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
+                self.safe_addstr(1, 2 + len(compact_badge), truncate_width(title, rem_t), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
             elap = f"{pos_s} / {dur_s}" + (f" ({audio_badge})" if audio_badge else "")
             self.safe_addstr(2, 1, truncate_width(elap, l_in_w), curses.color_pair(PAIR_CYAN))
 
         r_in_w = max(1, rw - 2)
+        vol_prefix = "Vol " if r_in_w >= 16 else ""
         pct_lbl = f" {vol:3d}%"
-        slider_w = max(4, r_in_w - len(pct_lbl))
+        sx = rx + 1 + len(vol_prefix)
+        slider_w = max(4, r_in_w - len(vol_prefix) - len(pct_lbl))
+        if vol_prefix:
+            self.safe_addstr(1, rx + 1, vol_prefix, curses.color_pair(PAIR_DIM))
         s_left, s_thumb, s_right = build_volume_slider(vol, slider_w)
-        sx = rx + 1
         self.safe_addstr(1, sx, s_left, curses.color_pair(PAIR_CYAN))
         self.safe_addstr(1, sx + len(s_left), s_thumb, curses.color_pair(PAIR_AMBER) | curses.A_BOLD)
         self.safe_addstr(1, sx + len(s_left) + len(s_thumb), s_right, curses.color_pair(PAIR_BOX))
         self.add_hitbox(sx, 1, sx + slider_w, 2, "vol_bar", (sx, slider_w))
-        if slider_w + len(pct_lbl) <= r_in_w:
+        if len(vol_prefix) + slider_w + len(pct_lbl) <= r_in_w:
             px = sx + slider_w
             self.safe_addstr(1, px, pct_lbl, curses.color_pair(PAIR_RED if muted else PAIR_CYAN) | curses.A_BOLD)
             self.add_hitbox(px, 1, px + len(pct_lbl), 2, "mute", None)
@@ -1316,6 +1361,11 @@ class SovereignDashboard:
         avail = max(1, limit_x - cx)
         full_w = sum(len(lbl) + 3 for _k, lbl in self.TABS)
         use_compact_lbl = full_w > avail
+        show_dividers = (not use_compact_lbl) and (full_w + 6 <= avail)
+        div_after = {0, 4, 5}
+        dl_jobs = getattr(self, "dl_jobs", [])
+        dl_badge = f"D:{len(dl_jobs)}" if dl_jobs else ""
+        tab_limit = limit_x - (len(dl_badge) + 3 if dl_badge and avail > 60 else 0)
         for idx, (key, lbl) in enumerate(self.TABS):
             is_act = self.active_tab == key
             if use_compact_lbl:
@@ -1324,12 +1374,55 @@ class SovereignDashboard:
             else:
                 pill = f" {lbl} "
             pw = len(pill)
-            if cx + pw > limit_x:
+            if cx + pw > tab_limit:
                 break
-            attr = curses.color_pair(PAIR_PILL_ACTIVE if is_act else PAIR_DEFAULT) | (curses.A_BOLD if is_act else 0)
-            self.safe_addstr(ty, cx, pill, attr)
+            if is_act:
+                self.safe_addstr(ty, cx, pill, curses.color_pair(PAIR_PILL_ACTIVE) | curses.A_BOLD)
+            elif not use_compact_lbl and " " in lbl:
+                num_p, name_p = lbl.split(" ", 1)
+                self.safe_addstr(ty, cx, f" {num_p} ", curses.color_pair(PAIR_DIM))
+                self.safe_addstr(ty, cx + len(num_p) + 2, f"{name_p} ", curses.color_pair(PAIR_DEFAULT))
+            else:
+                self.safe_addstr(ty, cx, pill, curses.color_pair(PAIR_DEFAULT))
             self.add_hitbox(cx, ty, cx + pw, ty + 1, "tab", key)
-            cx += pw + (1 if not use_compact_lbl and cx + pw + 1 < limit_x else 0)
+            cx += pw
+            if show_dividers and idx in div_after and cx + 2 <= tab_limit:
+                self.safe_addstr(ty, cx, "│", b_attr)
+                cx += 2
+            elif not use_compact_lbl and cx + 1 < tab_limit:
+                cx += 1
+        if dl_badge and cx + len(dl_badge) + 3 <= limit_x:
+            has_run = any(isinstance(j, dict) and j.get("status") == "running" for j in dl_jobs)
+            self.draw_button(ty, limit_x - len(dl_badge) - 2, dl_badge, "rtab", "downloads", active=has_run)
+
+    def render_context_bar(self, y: int, w: int) -> None:
+        self.safe_addstr(y, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
+        bx = 1
+        bx = self.draw_button(y, bx, "Bksp <-", "nav_back", None)
+        dkind = getattr(self, "drill_kind", "")
+        cat_src = getattr(self, "catalog_source", "ytm")
+        if dkind == "playlist":
+            scope_prefix = "Playlist"
+        elif dkind == "local_group":
+            scope_prefix = "Local"
+        elif dkind == "entity_group":
+            scope_prefix = "Library"
+        else:
+            scope_prefix = cat_src
+        dtitle = getattr(self, "drill_title", "") or "Items"
+        ctx_lbl = f"{scope_prefix}: {dtitle} ({len(self.tracks)})"
+
+        actions: list[tuple[str, str]] = [("P Play All", "play_all"), ("E +Q All", "add_all"), ("W DL All", "dl_all")]
+        if dkind == "playlist":
+            actions.append(("S Sync", "sync_pl"))
+        btns_w = sum(len(lbl) + 3 for lbl, _ in actions)
+        max_ctx_w = max(8, w - bx - btns_w - 2)
+        self.safe_addstr(y, bx, truncate_width(ctx_lbl, max_ctx_w), curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+
+        ax = max(bx + 9, w - btns_w)
+        if ax + btns_w <= w:
+            for lbl, act in actions:
+                ax = self.draw_button(y, ax, lbl, act, None)
 
     def render_search_bar(self, y: int, w: int) -> None:
         self.safe_addstr(y, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
@@ -1353,13 +1446,14 @@ class SovereignDashboard:
         box_w = max(10, w - box_x - btn_search_w - btn_clear_w - 4)
         if self.search_focus or self.search_query:
             cursor_ch = "_" if self.search_focus else ""
-            inner = truncate_width(self.search_query + cursor_ch, max(1, box_w - 2))
+            raw_in = "/ " + self.search_query + cursor_ch
+            inner = truncate_width(raw_in, max(1, box_w - 2))
             box_txt = " " + inner + " " * max(0, box_w - 1 - display_width(inner))
             box_attr = curses.color_pair(PAIR_INPUT) | (curses.A_BOLD if self.search_focus else 0)
         else:
-            ph = truncate_width("Press / to search...", max(1, box_w - 2))
+            ph = truncate_width("/ Press / to search...", max(1, box_w - 2))
             box_txt = " " + ph + " " * max(0, box_w - 1 - display_width(ph))
-            box_attr = curses.color_pair(PAIR_DIM)
+            box_attr = curses.color_pair(PAIR_INPUT)
         self.safe_addstr(y, box_x, box_txt, box_attr)
         self.add_hitbox(box_x, y, box_x + box_w, y + 1, "focus_search", None)
 
@@ -1487,18 +1581,9 @@ class SovereignDashboard:
         self.safe_addstr(y0, x0, "╭" + "─" * max(0, w - 2) + "╮", border_attr)
         stack = getattr(self, "nav_stack", [])
         if stack:
-            bx = x0 + 2
-            bx = self.draw_button(y0, bx, "Bksp <-", "nav_back", None)
-            title_lbl = truncate_width(getattr(self, "drill_title", "") or "Items", max(8, w - bx - 28))
+            title_lbl = truncate_width(getattr(self, "drill_title", "") or "Items", max(8, w - 12))
             hdr = f" {title_lbl} ({len(self.tracks)}) "
-            self.safe_addstr(y0, bx, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
-            ax = bx + display_width(hdr) + 1
-            if ax + 24 < x0 + w - 1:
-                ax = self.draw_button(y0, ax, "P Play All", "play_all", None)
-                ax = self.draw_button(y0, ax, "E +Q All", "add_all", None)
-                ax = self.draw_button(y0, ax, "W DL All", "dl_all", None)
-                if getattr(self, "drill_kind", "") == "playlist" and ax + 9 < x0 + w - 1:
-                    self.draw_button(y0, ax, "S Sync", "sync_pl", None)
+            self.safe_addstr(y0, x0 + 2, hdr, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
         else:
             tab_title = dict(self.TABS).get(self.active_tab, self.active_tab.upper())
             hdr = f" {tab_title} " if self.active_tab == "lyrics" else f" {tab_title} ({len(self.tracks)}) "
@@ -1759,6 +1844,26 @@ class SovereignDashboard:
 
         self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
 
+    def render_hint_bar(self, y: int, w: int) -> None:
+        self.safe_addstr(y, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
+        is_grp = bool(self.tracks and self.tracks[0][3] in GROUP_LIST_TAGS)
+        hints = build_context_hints(
+            self.active_tab,
+            search_focus=bool(getattr(self, "search_focus", False)),
+            active_modal=str(getattr(self, "active_modal", "")),
+            has_nav=bool(getattr(self, "nav_stack", None)),
+            is_group_list=is_grp,
+        )
+        cx = 1
+        for k_txt, lbl in hints:
+            need = len(k_txt) + 1 + len(lbl) + 2
+            if cx + need > w:
+                break
+            self.safe_addstr(y, cx, k_txt, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+            cx += len(k_txt) + 1
+            self.safe_addstr(y, cx, lbl, curses.color_pair(PAIR_DIM))
+            cx += len(lbl) + 2
+
     def render_rmpc_footer(self, layout: dict[str, Any]) -> None:
         fy, fh, _fx0, fw = layout["footer"]
         _, _, _mx0, mw = layout["footer_mode"]
@@ -1769,10 +1874,15 @@ class SovereignDashboard:
         pl = self.mpv_state.get("playlist") or []
 
         dl_active = any(isinstance(j, dict) and j.get("status") == "running" for j in getattr(self, "dl_jobs", []))
-        if getattr(self, "search_focus", False) or self.active_tab == "search":
-            mode_lbl = "SEARCH"
+        cur_modal = getattr(self, "active_modal", "")
+        if getattr(self, "search_focus", False):
+            mode_lbl = "INPUT"
             mode_pair = PAIR_GREEN
             mode_act: tuple[str, Any] = ("focus_search", None)
+        elif cur_modal in ("downloads", "info"):
+            mode_lbl = "MODAL"
+            mode_pair = PAIR_PURPLE
+            mode_act = ("close_modal", None)
         elif dl_active:
             mode_lbl = "DL"
             mode_pair = PAIR_AMBER
@@ -1786,6 +1896,31 @@ class SovereignDashboard:
         has_toast = bool(self.toast_msg and time.monotonic() < self.toast_until)
         right_title = f"{self.toast_msg} | {summary}" if has_toast else summary
         b_attr = curses.color_pair(PAIR_BOX)
+
+        def draw_timeline(ty: int, tx: int, tw: int) -> None:
+            pos_s = format_mmss(pos)
+            dur_s = format_mmss(dur)
+            if tw >= 24:
+                self.safe_addstr(ty, tx, pos_s, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
+                self.safe_addstr(ty, tx + tw - len(dur_s), dur_s, curses.color_pair(PAIR_CYAN))
+                bar_x = tx + len(pos_s) + 2
+                bar_w = max(4, tw - len(pos_s) - len(dur_s) - 4)
+            else:
+                bar_x = tx
+                bar_w = max(4, tw)
+            if dur > 0 and bar_w >= 4:
+                ratio = max(0.0, min(1.0, pos / dur))
+                knob_idx = min(bar_w - 1, max(0, int(round(ratio * (bar_w - 1)))))
+                left_track = "━" * knob_idx
+                right_track = "─" * max(0, bar_w - knob_idx - 1)
+                if left_track:
+                    self.safe_addstr(ty, bar_x, left_track, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
+                self.safe_addstr(ty, bar_x + knob_idx, "●", curses.color_pair(PAIR_AMBER) | curses.A_BOLD)
+                if right_track:
+                    self.safe_addstr(ty, bar_x + knob_idx + 1, right_track, curses.color_pair(PAIR_DIM))
+            else:
+                self.safe_addstr(ty, bar_x, "─" * bar_w, curses.color_pair(PAIR_DIM))
+            self.add_hitbox(bar_x, ty, bar_x + bar_w, ty + 1, "seek_bar", (bar_x, bar_w, dur))
 
         if fh >= 3:
             top_line = "╭" + "─" * max(0, mw - 1) + "┬" + "─" * max(0, pw - 2) + "╮"
@@ -1808,14 +1943,7 @@ class SovereignDashboard:
             self.safe_addstr(fy + 1, 1 + m_pad, m_txt, curses.color_pair(mode_pair) | curses.A_BOLD)
             self.add_hitbox(1, fy + 1, mw, fy + 2, mode_act[0], mode_act[1])
 
-            bar_x = mw + 2
-            bar_w = max(4, pw - 4)
-            filled, empty = build_progress_bar(pos, dur, bar_w)
-            if filled:
-                self.safe_addstr(fy + 1, bar_x, filled, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
-            if empty:
-                self.safe_addstr(fy + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
-            self.add_hitbox(bar_x, fy + 1, bar_x + bar_w, fy + 2, "seek_bar", (bar_x, bar_w, dur))
+            draw_timeline(fy + 1, mw + 2, max(4, pw - 4))
             self.safe_addstr(fy + 2, 0, bot_line, b_attr)
         else:
             self.safe_addstr(fy, 0, "─" * fw, b_attr)
@@ -1827,14 +1955,7 @@ class SovereignDashboard:
             m_pill = f" {mode_lbl} "
             self.safe_addstr(fy + 1, 0, m_pill, curses.color_pair(mode_pair) | curses.A_BOLD)
             self.add_hitbox(0, fy + 1, len(m_pill), fy + 2, mode_act[0], mode_act[1])
-            bar_x = len(m_pill) + 1
-            bar_w = max(4, fw - bar_x - 1)
-            filled, empty = build_progress_bar(pos, dur, bar_w)
-            if filled:
-                self.safe_addstr(fy + 1, bar_x, filled, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
-            if empty:
-                self.safe_addstr(fy + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
-            self.add_hitbox(bar_x, fy + 1, bar_x + bar_w, fy + 2, "seek_bar", (bar_x, bar_w, dur))
+            draw_timeline(fy + 1, len(m_pill) + 1, max(4, fw - len(m_pill) - 2))
 
     def render_overlay_modal(self, h: int, w: int, kind: str) -> None:
         mw = min(max(36, w - 4), 76)
@@ -1960,13 +2081,14 @@ class SovereignDashboard:
             self.stdscr.refresh()
             return
 
-        show_search = self.active_tab == "search"
+        has_nav = bool(getattr(self, "nav_stack", None))
+        show_top_bar = (self.active_tab == "search") or has_nav
         layout = compute_rmpc_layout(
             h,
             w,
             getattr(self, "layout_mode", "auto"),
             getattr(self, "show_drawer", True),
-            search_bar=show_search,
+            search_bar=show_top_bar,
             active_tab=self.active_tab,
         )
         self.last_layout = layout
@@ -1977,13 +2099,19 @@ class SovereignDashboard:
         self.render_rmpc_tabs(layout)
         if layout["search_bar"] is not None:
             sy, _sh, _sx, sw = layout["search_bar"]
-            self.render_search_bar(sy, sw)
+            if has_nav:
+                self.render_context_bar(sy, sw)
+            else:
+                self.render_search_bar(sy, sw)
 
         if layout["art"] is not None or layout["lyrics"] is not None:
             self.render_queue_art_lyrics_pane(layout["art"], layout["lyrics"])
         self.render_left_pane(*layout["list"])
         if layout["drawer"] is not None:
             self.render_drawer_card(*layout["drawer"])
+        if layout.get("hint_bar") is not None:
+            hy, _hh, _hx, hw = layout["hint_bar"]
+            self.render_hint_bar(hy, hw)
 
         self.render_rmpc_footer(layout)
         if getattr(self, "active_modal", "") in ("downloads", "info"):
