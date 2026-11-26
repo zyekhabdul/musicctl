@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import curses
-import dataclasses
 import json
 import locale
-import math
 import os
 import queue
 import re
@@ -15,7 +13,6 @@ import subprocess
 import sys
 import threading
 import time
-import unicodedata
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -43,6 +40,33 @@ from common import (
     parse_synced_lyrics_lines,
     pick_best_lyrics_candidate,
 )
+from tui_widgets import (
+    LAYOUT_MODES,
+    RMPC_TABS,
+    SGR_RE,
+    WAVE_BARS,
+    Hitbox,
+    apply_search_key,
+    build_lightweight_wave,
+    build_progress_bar,
+    build_volume_slider,
+    calc_art_size,
+    calc_seek_target,
+    calc_vol_target,
+    compute_layout,
+    compute_rmpc_layout,
+    display_width,
+    enrich_tsv_entry,
+    extract_album_from_meta,
+    format_album_line,
+    format_audio_badge,
+    format_queue_summary,
+    format_track_row_columns,
+    is_placeholder_title,
+    parse_ansi_art,
+    parse_download_jsonl_line,
+    truncate_width,
+)
 
 # UI color pair IDs (1..24 reserved; 25+ dynamic for album art)
 PAIR_DEFAULT = 0
@@ -66,326 +90,6 @@ PAIR_TOAST = 17
 PAIR_SPEC_HIGH = 18
 
 ART_PAIR_START = 25
-SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
-WAVE_BARS = "▁▂▃▄▅▆▇█"
-LAYOUT_MODES = ("auto", "split", "stacked", "focus")
-
-
-def compute_layout(h: int, w: int, mode: str = "auto", show_drawer: bool = True) -> dict[str, Any]:
-    """Compute adaptive pane rectangles (y0, h, x0, w) for split, stacked, or focus modes."""
-    mid_y = 2
-    deck_h = 4
-    mid_h = max(4, h - mid_y - deck_h)
-    req_mode = mode if mode in LAYOUT_MODES else "auto"
-
-    if req_mode == "focus" or not show_drawer:
-        eff = "focus"
-        if mid_h >= 14:
-            np_rect = (mid_y, 5, 0, w)
-            list_rect = (mid_y + 5, mid_h - 5, 0, w)
-        else:
-            np_rect = None
-            list_rect = (mid_y, mid_h, 0, w)
-        return {"effective": eff, "list": list_rect, "now_playing": np_rect, "drawer": None}
-
-    use_split = req_mode == "split" or (req_mode == "auto" and w >= 110 and w >= int(h * 2.1))
-    if use_split and w >= 64:
-        eff = "split"
-        left_w = max(36, min(w - 28, int(w * 0.58)))
-        right_w = w - left_w
-        if mid_h < 8:
-            return {
-                "effective": eff,
-                "list": (mid_y, mid_h, 0, left_w),
-                "now_playing": (mid_y, mid_h, left_w, right_w),
-                "drawer": None,
-            }
-        min_top = 8 if mid_h >= 12 else 4
-        top_h = min(15, mid_h - 4, max(min_top, int(mid_h * 0.36)))
-        bot_h = mid_h - top_h
-        return {
-            "effective": eff,
-            "list": (mid_y, mid_h, 0, left_w),
-            "now_playing": (mid_y, top_h, left_w, right_w),
-            "drawer": (mid_y + top_h, bot_h, left_w, right_w),
-        }
-
-    eff = "stacked"
-    if mid_h < 9:
-        return {
-            "effective": eff,
-            "list": (mid_y, mid_h, 0, w),
-            "now_playing": None,
-            "drawer": None,
-        }
-    np_h = 9 if mid_h >= 28 else (7 if mid_h >= 18 else 5)
-    dr_h = max(6, min(14, int(mid_h * 0.28))) if mid_h >= 16 else 0
-    list_h = mid_h - np_h - dr_h
-    return {
-        "effective": eff,
-        "list": (mid_y + np_h, list_h, 0, w),
-        "now_playing": (mid_y, np_h, 0, w),
-        "drawer": (mid_y + np_h + list_h, dr_h, 0, w) if dr_h > 0 else None,
-    }
-
-
-def build_lightweight_wave(width: int, tick: int, paused: bool) -> str:
-    """Build lightweight stdlib full-width audio pulse bar matching card width."""
-    if width <= 0:
-        return ""
-    if paused:
-        return "▁" * width
-    out: list[str] = []
-    n_bars = len(WAVE_BARS) - 1
-    for i in range(width):
-        v = 0.55 * math.sin(tick * 0.45 + i * 0.35) + 0.45 * math.cos(tick * 0.25 - i * 0.22)
-        level = int(round(((v + 1.0) * 0.5) * n_bars))
-        out.append(WAVE_BARS[max(0, min(n_bars, level))])
-    return "".join(out)
-
-
-def calc_art_size(card_h: int, card_w: int) -> tuple[int, int] | None:
-    """Scale chafa symbol art dimensions to fit NOW PLAYING card safely."""
-    if card_h < 6 or card_w < 44:
-        return None
-    art_h = max(4, min(11, card_h - 2))
-    art_w = min(26, max(10, art_h * 2 + 2), max(10, card_w // 3))
-    return art_w, art_h
-
-
-def is_placeholder_title(title: str, vid: str = "") -> bool:
-    """Return True when mpv media-title is still an unresolved URL or video ID placeholder."""
-    t = (title or "").strip()
-    if not t:
-        return True
-    if vid and t == vid:
-        return True
-    if t.startswith(("watch?v=", "http://", "https://")):
-        return True
-    return bool(VIDEO_ID_RE.match(t))
-
-
-def format_audio_badge(codec: str, samplerate: Any, sample_fmt: str = "") -> str:
-    """Format codec, bit depth (for lossless), and kHz into compact badge."""
-    c = (codec or "").strip().lower()
-    if not c:
-        return ""
-    bits_lbl = ""
-    if c in ("flac", "alac", "wav", "pcm_s16le", "pcm_s24le", "pcm_s32le"):
-        fmt = (sample_fmt or "").strip().lower()
-        if fmt in ("s16", "s16p"):
-            bits_lbl = " 16-bit"
-        elif fmt in ("s24", "s24p", "s32", "s32p", "flt", "fltp", "float", "floatp"):
-            bits_lbl = " 24-bit"
-    hz_lbl = ""
-    try:
-        sr = int(samplerate or 0)
-    except (TypeError, ValueError):
-        sr = 0
-    if sr > 0:
-        khz = sr / 1000.0
-        hz_lbl = f" {int(khz)}kHz" if sr % 1000 == 0 else f" {khz:.1f}kHz"
-    return f"{c.upper()}{bits_lbl}{hz_lbl}"
-
-
-def format_album_line(album: str, year: int = 0) -> str:
-    """Format album and optional release year for TUI display."""
-    alb = (album or "").strip()
-    if not alb:
-        return ""
-    return f"{alb} ({year})" if year > 0 else alb
-
-
-def extract_album_from_meta(meta: str) -> str:
-    """Extract album name from bullet-delimited track metadata string."""
-    parts = [p.strip() for p in (meta or "").split("•") if p.strip()]
-    if len(parts) < 2 or parts[0] in ("Album", "Single", "EP", "Playlist", "Artist"):
-        return ""
-    cand = parts[1]
-    if re.match(r"^\d+:\d{2}(?::\d{2})?$", cand) or re.match(r"^(?:19|20)\d{2}$", cand):
-        return ""
-    if cand in ("Video ID", "Direct URL", "Local File", "Local Audio", "Now Playing", "Active", "Queued"):
-        return ""
-    return cand
-
-
-def calc_seek_target(rel_x: int, bar_width: int, duration: float) -> float:
-    """Map relative click X inside progress bar to target timestamp in seconds."""
-    if bar_width <= 1 or duration <= 0:
-        return 0.0
-    clamped = max(0, min(rel_x, bar_width - 1))
-    ratio = clamped / float(bar_width - 1)
-    return max(0.0, min(float(duration), ratio * float(duration)))
-
-
-def calc_vol_target(rel_x: int, bar_width: int, max_vol: int = 100) -> int:
-    """Map relative click X inside volume bar to target integer volume."""
-    if bar_width <= 1:
-        return 0
-    clamped = max(0, min(rel_x, bar_width - 1))
-    ratio = clamped / float(bar_width - 1)
-    return int(round(ratio * max_vol))
-
-
-def apply_search_key(query: str, key: int | str) -> tuple[str, str]:
-    """Apply a curses get_wch() key to the search query buffer -> (new_query, action)."""
-    if key in (27, "\x1b"):
-        return query, "blur"
-    if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
-        return query, "submit"
-    if key in (21, 11, "\x15", "\x0b"):
-        return "", "stay"
-    if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
-        return query[:-1], "stay"
-    if isinstance(key, str) and len(key) == 1 and key.isprintable() and ord(key) >= 32:
-        return query + key, "stay"
-    return query, "stay"
-
-
-def display_width(text: str) -> int:
-    """Compute terminal column width accounting for wide Unicode characters."""
-    width = 0
-    for ch in text:
-        if unicodedata.combining(ch):
-            continue
-        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-    return width
-
-
-def truncate_width(text: str, max_cols: int, ellipsis: str = "…") -> str:
-    """Truncate text to fit within max_cols terminal columns."""
-    if max_cols <= 0:
-        return ""
-    if display_width(text) <= max_cols:
-        return text
-    ell_w = display_width(ellipsis)
-    if max_cols <= ell_w:
-        return ellipsis[:max_cols]
-    out: list[str] = []
-    cur = 0
-    limit = max_cols - ell_w
-    for ch in text:
-        cw = 0 if unicodedata.combining(ch) else (2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
-        if cur + cw > limit:
-            break
-        out.append(ch)
-        cur += cw
-    return "".join(out) + ellipsis
-
-
-def format_track_row_columns(title: str, meta: str, avail_w: int) -> str:
-    """Format track title and metadata into aligned columns on wide panes, or compact single line when narrow."""
-    if avail_w <= 0:
-        return ""
-    if not meta or avail_w < 54:
-        combined = f"{title} — {meta}" if meta else title
-        return truncate_width(combined, avail_w)
-    sep = " │ "
-    sep_w = display_width(sep)
-    title_w = max(22, int((avail_w - sep_w) * 0.56))
-    meta_w = avail_w - sep_w - title_w
-    if meta_w < 12:
-        return truncate_width(f"{title} — {meta}", avail_w)
-    t_col = truncate_width(title, title_w)
-    t_pad = max(0, title_w - display_width(t_col))
-    m_col = truncate_width(meta, meta_w)
-    return f"{t_col}{' ' * t_pad}{sep}{m_col}"
-
-
-def enrich_tsv_entry(path: Path, vid: str, title: str, meta: str) -> bool:
-    """Replace raw Video ID / Direct URL placeholder row in TSV with real title & meta."""
-    if not path.is_file() or not vid or not title or title == vid:
-        return False
-    clean_title = re.sub(r"[\t\r\n]+", " ", title).strip()
-    clean_meta = re.sub(r"[\t\r\n]+", " ", meta).strip()
-    if not clean_title:
-        return False
-    raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    new_lines: list[str] = []
-    changed = False
-    for line in raw_lines:
-        parts = line.split("\t")
-        if len(parts) >= 2 and parts[0] == vid:
-            old_title = parts[1].strip()
-            old_meta = parts[2].strip() if len(parts) > 2 else ""
-            if old_title == vid or old_meta in ("Video ID", "Direct URL", ""):
-                new_lines.append(f"{vid}\t{clean_title}\t{clean_meta}")
-                changed = True
-                continue
-        new_lines.append(line)
-    if not changed:
-        return False
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    tmp.replace(path)
-    return True
-
-
-def parse_ansi_art(ansi_text: str) -> list[list[tuple[str, int, int]]]:
-    """Parse 256-color SGR ANSI art into rows of (char, fg256, bg256)."""
-    rows: list[list[tuple[str, int, int]]] = []
-    cleaned = re.sub(r"\x1b\[\?[0-9;]*[hl]", "", ansi_text)
-    for raw_line in cleaned.splitlines():
-        if not raw_line:
-            continue
-        row: list[tuple[str, int, int]] = []
-        fg, bg = -1, -1
-        pos = 0
-        for m in SGR_RE.finditer(raw_line):
-            chunk = raw_line[pos:m.start()]
-            for ch in chunk:
-                row.append((ch, fg, bg))
-            pos = m.end()
-            codes_str = m.group(1)
-            codes = [int(c) for c in codes_str.split(";") if c] if codes_str else [0]
-            i = 0
-            while i < len(codes):
-                c = codes[i]
-                if c == 0:
-                    fg, bg = -1, -1
-                elif c == 38 and i + 2 < len(codes) and codes[i + 1] == 5:
-                    fg = codes[i + 2]
-                    i += 2
-                elif c == 48 and i + 2 < len(codes) and codes[i + 1] == 5:
-                    bg = codes[i + 2]
-                    i += 2
-                elif c == 39:
-                    fg = -1
-                elif c == 49:
-                    bg = -1
-                i += 1
-        tail = raw_line[pos:]
-        for ch in tail:
-            row.append((ch, fg, bg))
-        if row:
-            rows.append(row)
-    return rows
-
-
-def parse_download_jsonl_line(line: str) -> dict[str, Any] | None:
-    """Parse one --jsonl progress line from lib/downloader.py."""
-    s = (line or "").strip()
-    if not s or not s.startswith("{"):
-        return None
-    try:
-        obj = json.loads(s)
-    except Exception:
-        return None
-    if not isinstance(obj, dict) or "job_id" not in obj:
-        return None
-    try:
-        pct = max(0, min(100, int(obj.get("pct") or 0)))
-    except (TypeError, ValueError):
-        pct = 0
-    return {
-        "job_id": str(obj.get("job_id") or ""),
-        "title": str(obj.get("title") or "download"),
-        "stage": str(obj.get("stage") or ""),
-        "pct": pct,
-        "status": str(obj.get("status") or "running"),
-        "dest": str(obj.get("dest") or ""),
-        "error": str(obj.get("error") or ""),
-    }
 
 
 class DownloadManager:
@@ -517,31 +221,10 @@ class DownloadManager:
         return count
 
 
-@dataclasses.dataclass
-class Hitbox:
-    x0: int
-    y0: int
-    x1: int
-    y1: int
-    action: str
-    payload: Any = None
-
-    def contains(self, x: int, y: int) -> bool:
-        return self.x0 <= x < self.x1 and self.y0 <= y < self.y1
-
-
 class SovereignDashboard:
     """Interactive clickable & realtime curses dashboard for musicctl."""
 
-    TABS = [
-        ("home", "1 Home"),
-        ("search", "2 Search"),
-        ("queue", "3 Queue"),
-        ("fav", "4 Favs"),
-        ("hist", "5 Hist"),
-        ("local", "6 Local"),
-        ("playlists", "7 Pl"),
-    ]
+    TABS = list(RMPC_TABS)
     RIGHT_TABS = [("upnext", "U Up Next"), ("lyrics", "Y Lyrics"), ("info", "I Info"), ("downloads", "D DL")]
     CATALOG_SOURCES = ("ytm", "deezer", "itunes")
     SEARCH_TYPES = ("songs", "albums", "artists", "playlists")
@@ -572,7 +255,7 @@ class SovereignDashboard:
         self.lock = threading.Lock()
         self.ui_events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
 
-        self.active_tab = "search" if initial_query else "home"
+        self.active_tab = "search" if initial_query else "queue"
         self.right_tab = "upnext"
         self.layout_mode = "auto"
         self.show_drawer = True
@@ -861,14 +544,14 @@ class SovereignDashboard:
                 rows.append((f"pl:{p.stem}", p.stem, f"{len(lines)} tracks", "[PL]"))
         return rows
 
-    def load_local_grouped(self) -> list[tuple[str, str, str, str]]:
+    def load_local_grouped(self, mode: str | None = None) -> list[tuple[str, str, str, str]]:
         cache_file = self.cache_dir / "library.json"
         entries = library.scan_library(self.download_dir, cache_file)
-        mode = getattr(self, "local_group_mode", "flat")
+        eff_mode = mode if mode in self.LOCAL_GROUP_MODES else getattr(self, "local_group_mode", "flat")
         groups_map: dict[str, list[dict[str, Any]]] = {}
         self._local_groups = groups_map
 
-        if mode == "artist":
+        if eff_mode == "artist":
             rows: list[tuple[str, str, str, str]] = []
             for g in library.group_by_artist(entries):
                 key = f"lart:{g['artist']}"
@@ -876,7 +559,7 @@ class SovereignDashboard:
                 rows.append((key, g["artist"], f"{len(g['tracks'])} tracks", "[L-ART]"))
             return rows
 
-        if mode == "album":
+        if eff_mode == "album":
             rows = []
             for g in library.group_by_album(entries):
                 key = f"lalb:{g['album']}"
@@ -962,10 +645,16 @@ class SovereignDashboard:
                 state_lbl = "Active" if entry.get("current") else "Queued"
                 qitems.append((vid, title, f"#{idx + 1} • {state_lbl}", "[Q]"))
             self.tracks = qitems
+        elif self.active_tab == "artists":
+            self.tracks = self.load_local_grouped("artist")
+        elif self.active_tab == "albums":
+            self.tracks = self.load_local_grouped("album")
         elif self.active_tab == "local":
             self.tracks = self.load_local_grouped()
         elif self.active_tab == "playlists":
             self.tracks = self.load_playlists_list()
+        elif self.active_tab == "lyrics":
+            self.right_tab = "lyrics"
 
         if self.selected_idx >= len(self.tracks):
             self.selected_idx = max(0, len(self.tracks) - 1)
@@ -1418,52 +1107,194 @@ class SovereignDashboard:
             return "all"
         return "off"
 
-    def render_header(self, w: int) -> None:
-        self.safe_addstr(0, 0, " " * w, curses.color_pair(PAIR_PILL_BTN))
-        brand = " MUSICCTL v2.3 "
-        self.safe_addstr(0, 0, brand, curses.color_pair(PAIR_PILL_ACTIVE) | curses.A_BOLD)
-        cx = len(brand) + 1
-        for key, lbl in self.TABS:
-            is_act = self.active_tab == key
-            pill = f" {lbl} "
-            pw = len(pill)
-            if cx + pw + 18 > w:
+    def _draw_header_flags(self, y: int, x0: int, avail_w: int, muted: bool) -> None:
+        if avail_w <= 6:
+            return
+        loop_m = self.get_loop_mode()
+        flags = [
+            ("o", "loop", loop_m != "off"),
+            ("u", "shuffle", False),
+            ("e", "eq", getattr(self, "eq_mode", "flat") != "flat"),
+            ("N", "norm", bool(getattr(self, "norm_on", False))),
+            ("A", "autoplay", bool(getattr(self, "autoplay_on", False))),
+            ("m", "mute", muted),
+        ]
+        help_btn = "[?]"
+        fx = x0
+        max_fx = x0 + avail_w - len(help_btn) - 1
+        for lbl, act, is_act in flags:
+            if fx + len(lbl) > max_fx:
                 break
-            attr = curses.color_pair(PAIR_PILL_ACTIVE if is_act else PAIR_PILL_BTN) | (curses.A_BOLD if is_act else 0)
-            self.safe_addstr(0, cx, pill, attr)
-            self.add_hitbox(cx, 0, cx + pw, 1, "tab", key)
-            cx += pw + 1
+            pair = PAIR_RED if (act == "mute" and muted) else (PAIR_AMBER if is_act else PAIR_DIM)
+            attr = curses.color_pair(pair) | (curses.A_BOLD if is_act else 0)
+            self.safe_addstr(y, fx, lbl, attr)
+            self.add_hitbox(fx, y, fx + len(lbl), y + 1, act, None)
+            fx += len(lbl) + 1
+        hx = max(fx, x0 + avail_w - len(help_btn))
+        if hx + len(help_btn) <= x0 + avail_w:
+            h_attr = curses.color_pair(PAIR_PILL_ACTIVE if self.show_help else PAIR_CYAN) | curses.A_BOLD
+            self.safe_addstr(y, hx, help_btn, h_attr)
+            self.add_hitbox(hx, y, hx + len(help_btn), y + 1, "help", None)
 
+    def render_rmpc_header(self, layout: dict[str, Any]) -> None:
+        compact = bool(layout.get("compact"))
+        boxes = layout["header_boxes"]
         idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
         paused = bool(self.mpv_state.get("pause", False))
+        badge = "[IDLE]" if idle else ("[PAUSE]" if paused else "[PLAY]")
+        badge_pair = PAIR_DIM if idle else (PAIR_AMBER if paused else PAIR_GREEN)
+        pos_s = format_mmss(float(self.mpv_state.get("time-pos") or 0.0))
+        dur_s = format_mmss(float(self.mpv_state.get("duration") or 0.0))
         codec = str(self.mpv_state.get("audio-codec-name") or "")
         srate = self.mpv_state.get("audio-params/samplerate") or 0
         sfmt = str(self.mpv_state.get("audio-params/format") or "")
-        badge = "[IDLE]" if idle else ("[PAUSE]" if paused else "[PLAY]")
-        badge_pair = PAIR_DIM if idle else (PAIR_AMBER if paused else PAIR_GREEN)
         audio_badge = format_audio_badge(codec, srate, sfmt)
-        codec_str = f" {audio_badge}" if audio_badge else ""
-        right_str = f"{badge}{codec_str} "
-        rx = max(cx, w - len(right_str) - 1)
-        self.safe_addstr(0, rx, badge, curses.color_pair(badge_pair) | curses.A_BOLD)
-        if codec_str:
-            self.safe_addstr(0, rx + len(badge), codec_str, curses.color_pair(PAIR_CYAN))
+        spd_lbl = format_speed(self.mpv_state.get("speed"))
 
-    def render_search_bar(self, w: int) -> None:
-        self.safe_addstr(1, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
+        title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "")
+        if idle or not title:
+            title = "No Song"
+        mf = extract_metadata_fields(self.mpv_state.get("metadata"))
+        artist = mf.get("artist") or ""
+        album = format_album_line(mf.get("album", ""), mf.get("year", 0))
+        sub_line = "No active playback" if idle else (" - ".join([p for p in (artist, album) if p]) or "Unknown")
+        vol = max(0, min(100, int(round(float(self.mpv_state.get("volume") or 100)))))
+        muted = bool(self.mpv_state.get("mute", False))
+
+        if compact:
+            _, _, _, hw = layout["header"]
+            self.safe_addstr(0, 0, " " * hw, curses.color_pair(PAIR_PILL_BTN))
+            self.safe_addstr(0, 1, badge, curses.color_pair(badge_pair) | curses.A_BOLD)
+            self.add_hitbox(1, 0, 1 + len(badge), 1, "toggle", None)
+            help_btn = "[?]"
+            vol_lbl = f"{vol:3d}%"
+            hx = max(2 + len(badge), hw - len(help_btn) - 1)
+            vx = max(2 + len(badge), hx - len(vol_lbl) - 1)
+            title_x = 2 + len(badge)
+            title_w = max(0, vx - title_x - 1)
+            if title_w > 2:
+                summary_t = title if idle or not artist else f"{title} — {artist}"
+                self.safe_addstr(0, title_x, truncate_width(summary_t, title_w), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
+            if vx + len(vol_lbl) < hx:
+                self.safe_addstr(0, vx, vol_lbl, curses.color_pair(PAIR_RED if muted else PAIR_CYAN))
+                self.add_hitbox(vx, 0, vx + len(vol_lbl), 1, "mute", None)
+            self.safe_addstr(0, hx, help_btn, curses.color_pair(PAIR_PILL_ACTIVE if self.show_help else PAIR_CYAN) | curses.A_BOLD)
+            self.add_hitbox(hx, 0, hx + len(help_btn), 1, "help", None)
+            return
+
+        _, _, _, lw = boxes["left"]
+        _, _, rx, rw = boxes["right"]
+        center = boxes["center"]
+        b_attr = curses.color_pair(PAIR_BOX)
+
+        if center is not None:
+            _, _, cx, cw = center
+            top_line = "╭" + "─" * max(0, lw - 1) + "┬" + "─" * max(0, cw - 1) + "┬" + "─" * max(0, rw - 2) + "╮"
+            bot_line = "├" + "─" * max(0, lw - 1) + "┴" + "─" * max(0, cw - 1) + "┴" + "─" * max(0, rw - 2) + "┤"
+            self.safe_addstr(0, 0, top_line, b_attr)
+            for row_y in (1, 2):
+                self.safe_addstr(row_y, 0, "│", b_attr)
+                self.safe_addstr(row_y, lw, "│", b_attr)
+                self.safe_addstr(row_y, cx + cw, "│", b_attr)
+                self.safe_addstr(row_y, rx + rw - 1, "│", b_attr)
+            self.safe_addstr(3, 0, bot_line, b_attr)
+
+            l_in_w = max(1, lw - 2)
+            self.safe_addstr(1, 1, truncate_width(badge, l_in_w), curses.color_pair(badge_pair) | curses.A_BOLD)
+            self.add_hitbox(1, 1, min(lw, 1 + len(badge)), 2, "toggle", None)
+            if spd_lbl and l_in_w > len(badge) + len(spd_lbl) + 2:
+                self.safe_addstr(1, 2 + len(badge), spd_lbl, curses.color_pair(PAIR_AMBER))
+            elap = f"{pos_s} / {dur_s}" + (f" ({audio_badge})" if audio_badge else "")
+            self.safe_addstr(2, 1, truncate_width(elap, l_in_w), curses.color_pair(PAIR_CYAN))
+
+            c_in_w = max(1, cw - 2)
+            t_disp = truncate_width(title, c_in_w)
+            t_pad = max(0, (c_in_w - display_width(t_disp)) // 2)
+            self.safe_addstr(1, cx + 1 + t_pad, t_disp, curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
+            s_disp = truncate_width(sub_line, c_in_w)
+            s_pad = max(0, (c_in_w - display_width(s_disp)) // 2)
+            self.safe_addstr(2, cx + 1 + s_pad, s_disp, curses.color_pair(PAIR_DIM if idle else PAIR_AMBER) | (0 if idle else curses.A_BOLD))
+        else:
+            top_line = "╭" + "─" * max(0, lw - 1) + "┬" + "─" * max(0, rw - 2) + "╮"
+            bot_line = "├" + "─" * max(0, lw - 1) + "┴" + "─" * max(0, rw - 2) + "┤"
+            self.safe_addstr(0, 0, top_line, b_attr)
+            for row_y in (1, 2):
+                self.safe_addstr(row_y, 0, "│", b_attr)
+                self.safe_addstr(row_y, lw, "│", b_attr)
+                self.safe_addstr(row_y, rx + rw - 1, "│", b_attr)
+            self.safe_addstr(3, 0, bot_line, b_attr)
+
+            l_in_w = max(1, lw - 2)
+            self.safe_addstr(1, 1, truncate_width(badge, l_in_w), curses.color_pair(badge_pair) | curses.A_BOLD)
+            self.add_hitbox(1, 1, min(lw, 1 + len(badge)), 2, "toggle", None)
+            rem_t = max(0, l_in_w - len(badge) - 1)
+            if rem_t > 1:
+                self.safe_addstr(1, 2 + len(badge), truncate_width(title, rem_t), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
+            elap = f"{pos_s} / {dur_s}" + (f" ({audio_badge})" if audio_badge else "")
+            self.safe_addstr(2, 1, truncate_width(elap, l_in_w), curses.color_pair(PAIR_CYAN))
+
+        r_in_w = max(1, rw - 2)
+        pct_lbl = f" {vol:3d}%"
+        slider_w = max(4, r_in_w - len(pct_lbl))
+        s_left, s_thumb, s_right = build_volume_slider(vol, slider_w)
+        sx = rx + 1
+        self.safe_addstr(1, sx, s_left, curses.color_pair(PAIR_CYAN))
+        self.safe_addstr(1, sx + len(s_left), s_thumb, curses.color_pair(PAIR_AMBER) | curses.A_BOLD)
+        self.safe_addstr(1, sx + len(s_left) + len(s_thumb), s_right, curses.color_pair(PAIR_BOX))
+        self.add_hitbox(sx, 1, sx + slider_w, 2, "vol_bar", (sx, slider_w))
+        if slider_w + len(pct_lbl) <= r_in_w:
+            px = sx + slider_w
+            self.safe_addstr(1, px, pct_lbl, curses.color_pair(PAIR_RED if muted else PAIR_CYAN) | curses.A_BOLD)
+            self.add_hitbox(px, 1, px + len(pct_lbl), 2, "mute", None)
+        self._draw_header_flags(2, rx + 1, r_in_w, muted)
+
+    def render_rmpc_tabs(self, layout: dict[str, Any]) -> None:
+        ty, th, _tx0, tw = layout["tabs"]
+        b_attr = curses.color_pair(PAIR_BOX)
+        if th >= 2:
+            self.safe_addstr(ty, 0, "│", b_attr)
+            self.safe_addstr(ty, tw - 1, "│", b_attr)
+            self.safe_addstr(ty + 1, 0, "╰" + "─" * max(0, tw - 2) + "╯", b_attr)
+            cx = 1
+            limit_x = tw - 1
+        else:
+            self.safe_addstr(ty, 0, " " * tw, curses.color_pair(PAIR_DEFAULT))
+            cx = 0
+            limit_x = tw
+
+        avail = max(1, limit_x - cx)
+        full_w = sum(len(lbl) + 3 for _k, lbl in self.TABS)
+        use_compact_lbl = full_w > avail
+        for idx, (key, lbl) in enumerate(self.TABS):
+            is_act = self.active_tab == key
+            if use_compact_lbl:
+                short = lbl.split(" ", 1)[1][:2] if " " in lbl else lbl[:2]
+                pill = f" {idx + 1}{short} "
+            else:
+                pill = f" {lbl} "
+            pw = len(pill)
+            if cx + pw > limit_x:
+                break
+            attr = curses.color_pair(PAIR_PILL_ACTIVE if is_act else PAIR_DEFAULT) | (curses.A_BOLD if is_act else 0)
+            self.safe_addstr(ty, cx, pill, attr)
+            self.add_hitbox(cx, ty, cx + pw, ty + 1, "tab", key)
+            cx += pw + (1 if not use_compact_lbl and cx + pw + 1 < limit_x else 0)
+
+    def render_search_bar(self, y: int, w: int) -> None:
+        self.safe_addstr(y, 0, " " * w, curses.color_pair(PAIR_DEFAULT))
         cx = 1
         cat_src = getattr(self, "catalog_source", "ytm")
         stype = getattr(self, "search_type", "songs")
-        cx = self.draw_button(1, cx, f"C:{cat_src}", "cycle_catalog", None, active=(cat_src != "ytm"))
+        cx = self.draw_button(y, cx, f"C:{cat_src}", "cycle_catalog", None, active=(cat_src != "ytm"))
         if w >= 112:
             for scope_k, scope_lbl in (("songs", "Songs"), ("albums", "Albums"), ("artists", "Artists"), ("playlists", "Lists")):
                 attr = curses.color_pair(PAIR_PILL_ACTIVE if stype == scope_k else PAIR_PILL_BTN) | curses.A_BOLD
                 btn = f"[{scope_lbl}]"
-                self.safe_addstr(1, cx, btn, attr)
-                self.add_hitbox(cx, 1, cx + len(btn), 2, "set_search_type", scope_k)
+                self.safe_addstr(y, cx, btn, attr)
+                self.add_hitbox(cx, y, cx + len(btn), y + 1, "set_search_type", scope_k)
                 cx += len(btn) + 1
         else:
-            cx = self.draw_button(1, cx, f"T:{stype}", "cycle_search_type", None, active=(stype != "songs"))
+            cx = self.draw_button(y, cx, f"T:{stype}", "cycle_search_type", None, active=(stype != "songs"))
 
         btn_search_w = 8
         btn_clear_w = 7
@@ -1478,13 +1309,13 @@ class SovereignDashboard:
             ph = truncate_width("Press / to search...", max(1, box_w - 2))
             box_txt = " " + ph + " " * max(0, box_w - 1 - display_width(ph))
             box_attr = curses.color_pair(PAIR_DIM)
-        self.safe_addstr(1, box_x, box_txt, box_attr)
-        self.add_hitbox(box_x, 1, box_x + box_w, 2, "focus_search", None)
+        self.safe_addstr(y, box_x, box_txt, box_attr)
+        self.add_hitbox(box_x, y, box_x + box_w, y + 1, "focus_search", None)
 
         bx = box_x + box_w + 1
         search_lbl = "..." if self.search_loading else "Search"
-        bx = self.draw_button(1, bx, search_lbl, "do_search", None, active=self.search_loading)
-        self.draw_button(1, bx, "Clear", "clear_search", None)
+        bx = self.draw_button(y, bx, search_lbl, "do_search", None, active=self.search_loading)
+        self.draw_button(y, bx, "Clear", "clear_search", None)
 
     def render_left_pane(self, y0: int, h: int, x0: int, w: int) -> None:
         focused = getattr(self, "focus_pane", "list") == "list"
@@ -1827,100 +1658,98 @@ class SovereignDashboard:
         self.render_now_playing_card(y0, top_h, x0, w)
         self.render_drawer_card(y0 + top_h, bot_h, x0, w)
 
-    def render_transport_deck(self, y0: int, w: int) -> None:
-        # Row y0: separator
-        self.safe_addstr(y0, 0, "─" * w, curses.color_pair(PAIR_BOX))
+    def render_rmpc_footer(self, layout: dict[str, Any]) -> None:
+        fy, fh, _fx0, fw = layout["footer"]
+        _, _, _mx0, mw = layout["footer_mode"]
+        _, _, _px0, pw = layout["footer_progress"]
 
-        # Row y0+1: Clickable Seek Bar
         pos = float(self.mpv_state.get("time-pos") or 0.0)
         dur = float(self.mpv_state.get("duration") or 0.0)
-        pos_s = format_mmss(pos)
-        dur_s = format_mmss(dur)
-        left_lbl = f" {pos_s}  "
-        right_lbl = f"  {dur_s} "
-        bar_x = len(left_lbl)
-        bar_w = max(8, w - bar_x - len(right_lbl) - 1)
-        self.safe_addstr(y0 + 1, 0, left_lbl, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
-        if dur > 0:
-            knob = max(0, min(bar_w - 1, int(round((pos / dur) * (bar_w - 1)))))
-            filled = "━" * knob + "●"
-            empty = "─" * max(0, bar_w - knob - 1)
-            self.safe_addstr(y0 + 1, bar_x, filled, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
-            self.safe_addstr(y0 + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
+        pl = self.mpv_state.get("playlist") or []
+
+        dl_active = any(isinstance(j, dict) and j.get("status") == "running" for j in getattr(self, "dl_jobs", []))
+        if getattr(self, "search_focus", False) or self.active_tab == "search":
+            mode_lbl = "SEARCH"
+            mode_pair = PAIR_GREEN
+            mode_act: tuple[str, Any] = ("focus_search", None)
+        elif dl_active:
+            mode_lbl = "DL"
+            mode_pair = PAIR_AMBER
+            mode_act = ("rtab", "downloads")
         else:
-            self.safe_addstr(y0 + 1, bar_x, "─" * bar_w, curses.color_pair(PAIR_BAR_EMPTY))
-        self.safe_addstr(y0 + 1, bar_x + bar_w, right_lbl, curses.color_pair(PAIR_DIM))
-        self.add_hitbox(bar_x, y0 + 1, bar_x + bar_w, y0 + 2, "seek_bar", (bar_x, bar_w, dur))
+            mode_lbl = "NORMAL"
+            mode_pair = PAIR_PILL_ACTIVE
+            mode_act = ("focus_search", None)
 
-        # Row y0+2: Transport Buttons + Clickable Volume Bar
-        idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
-        paused = bool(self.mpv_state.get("pause", False))
-        bx = 1
-        bx = self.draw_button(y0 + 2, bx, "b Prev", "prev")
-        play_lbl = "Spc Play" if (idle or paused) else "Spc Pause"
-        bx = self.draw_button(y0 + 2, bx, play_lbl, "toggle", active=(not idle and not paused))
-        bx = self.draw_button(y0 + 2, bx, "n Next", "next")
-        bx = self.draw_button(y0 + 2, bx, "x Stop", "stop")
-        if bx + 28 < w:
-            bx = self.draw_button(y0 + 2, bx, "r Radio", "radio_sel")
-            bx = self.draw_button(y0 + 2, bx, "f Fav", "fav_sel")
-        if bx + 20 < w:
-            bx = self.draw_button(y0 + 2, bx, "a +Q", "add_sel")
+        summary = format_queue_summary(pl, dur)
+        has_toast = bool(self.toast_msg and time.monotonic() < self.toast_until)
+        right_title = f"{self.toast_msg} | {summary}" if has_toast else summary
+        b_attr = curses.color_pair(PAIR_BOX)
 
-        vol = int(float(self.mpv_state.get("volume") or 100))
-        muted = bool(self.mpv_state.get("mute", False))
-        vbar_w = 10
-        vol_widget_w = 5 + 4 + vbar_w + 6 + 4  # "Vol " + "[-] " + bar + " 100% " + "[+]"
-        vx = max(bx + 1, w - vol_widget_w - 1)
-        if vx + 22 <= w:
-            self.safe_addstr(y0 + 2, vx, "Vol ", curses.color_pair(PAIR_ICE))
-            vx += 4
-            vx = self.draw_button(y0 + 2, vx, "-", "vol_delta", -5)
-            v_fill = max(0, min(vbar_w, int(round((min(vol, 100) / 100.0) * vbar_w))))
-            self.safe_addstr(y0 + 2, vx, "█" * v_fill, curses.color_pair(PAIR_RED if muted else PAIR_GREEN))
-            self.safe_addstr(y0 + 2, vx + v_fill, "░" * (vbar_w - v_fill), curses.color_pair(PAIR_BAR_EMPTY))
-            self.add_hitbox(vx, y0 + 2, vx + vbar_w, y0 + 3, "vol_bar", (vx, vbar_w))
-            vx += vbar_w + 1
-            self.safe_addstr(y0 + 2, vx, f"{vol:3d}%", curses.color_pair(PAIR_RED if muted else PAIR_DEFAULT))
-            vx += 5
-            self.draw_button(y0 + 2, vx, "+", "vol_delta", 5)
+        if fh >= 3:
+            top_line = "╭" + "─" * max(0, mw - 1) + "┬" + "─" * max(0, pw - 2) + "╮"
+            bot_line = "╰" + "─" * max(0, mw - 1) + "┴" + "─" * max(0, pw - 2) + "╯"
+            self.safe_addstr(fy, 0, top_line, b_attr)
+            if pw > 6:
+                title_txt = f" {truncate_width(right_title, max(4, pw - 4))} "
+                tx = max(mw + 1, fw - 1 - display_width(title_txt))
+                t_attr = curses.color_pair(PAIR_TOAST if has_toast else PAIR_CYAN) | (curses.A_BOLD if has_toast else 0)
+                self.safe_addstr(fy, tx, title_txt, t_attr)
 
-        # Row y0+3: DSP & Mode Buttons + Toast
-        dx = 1
-        loop_m = self.get_loop_mode()
-        dx = self.draw_button(y0 + 3, dx, f"o Loop:{loop_m}", "loop", active=(loop_m != "off"))
-        dx = self.draw_button(y0 + 3, dx, "u Shuf", "shuffle")
-        dx = self.draw_button(y0 + 3, dx, f"Q:{self.quality_mode}", "quality", active=(self.quality_mode != "cd"))
-        dx = self.draw_button(y0 + 3, dx, f"e EQ:{self.eq_mode}", "eq", active=(self.eq_mode != "flat"))
-        dx = self.draw_button(y0 + 3, dx, f"N Norm:{'on' if self.norm_on else 'off'}", "norm", active=self.norm_on)
-        if dx + 14 < w:
-            dx = self.draw_button(y0 + 3, dx, f"A Auto:{'on' if self.autoplay_on else 'off'}", "autoplay", active=self.autoplay_on)
-        dx = self.draw_button(y0 + 3, dx, "m Mute" if not muted else "m UNMUTE", "mute", active=muted, pair=PAIR_RED if muted else PAIR_PILL_BTN)
-        eff_view = getattr(self, "last_layout", {}).get("effective") or getattr(self, "layout_mode", "auto")
-        if dx + 15 < w:
-            dx = self.draw_button(y0 + 3, dx, f"v {eff_view}", "cycle_layout", active=(getattr(self, "layout_mode", "auto") != "auto"))
-        dx = self.draw_button(y0 + 3, dx, "? Help", "help", active=self.show_help)
+            self.safe_addstr(fy + 1, 0, "│", b_attr)
+            self.safe_addstr(fy + 1, mw, "│", b_attr)
+            self.safe_addstr(fy + 1, fw - 1, "│", b_attr)
 
-        if self.toast_msg and time.monotonic() < self.toast_until and dx + 6 < w:
-            t_str = f" {truncate_width(self.toast_msg, w - dx - 3)} "
-            tx = max(dx + 1, w - len(t_str) - 1)
-            self.safe_addstr(y0 + 3, tx, t_str, curses.color_pair(PAIR_TOAST) | curses.A_BOLD)
+            m_in_w = max(1, mw - 2)
+            m_txt = truncate_width(f" {mode_lbl} ", m_in_w)
+            m_pad = max(0, (m_in_w - display_width(m_txt)) // 2)
+            self.safe_addstr(fy + 1, 1, " " * m_in_w, curses.color_pair(mode_pair))
+            self.safe_addstr(fy + 1, 1 + m_pad, m_txt, curses.color_pair(mode_pair) | curses.A_BOLD)
+            self.add_hitbox(1, fy + 1, mw, fy + 2, mode_act[0], mode_act[1])
+
+            bar_x = mw + 2
+            bar_w = max(4, pw - 4)
+            filled, empty = build_progress_bar(pos, dur, bar_w)
+            if filled:
+                self.safe_addstr(fy + 1, bar_x, filled, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
+            if empty:
+                self.safe_addstr(fy + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
+            self.add_hitbox(bar_x, fy + 1, bar_x + bar_w, fy + 2, "seek_bar", (bar_x, bar_w, dur))
+            self.safe_addstr(fy + 2, 0, bot_line, b_attr)
+        else:
+            self.safe_addstr(fy, 0, "─" * fw, b_attr)
+            if fw > 10:
+                title_txt = f" {truncate_width(right_title, max(4, fw - 4))} "
+                tx = max(0, fw - display_width(title_txt) - 1)
+                t_attr = curses.color_pair(PAIR_TOAST if has_toast else PAIR_CYAN) | (curses.A_BOLD if has_toast else 0)
+                self.safe_addstr(fy, tx, title_txt, t_attr)
+            m_pill = f" {mode_lbl} "
+            self.safe_addstr(fy + 1, 0, m_pill, curses.color_pair(mode_pair) | curses.A_BOLD)
+            self.add_hitbox(0, fy + 1, len(m_pill), fy + 2, mode_act[0], mode_act[1])
+            bar_x = len(m_pill) + 1
+            bar_w = max(4, fw - bar_x - 1)
+            filled, empty = build_progress_bar(pos, dur, bar_w)
+            if filled:
+                self.safe_addstr(fy + 1, bar_x, filled, curses.color_pair(PAIR_BAR_FILL) | curses.A_BOLD)
+            if empty:
+                self.safe_addstr(fy + 1, bar_x + len(filled), empty, curses.color_pair(PAIR_BAR_EMPTY))
+            self.add_hitbox(bar_x, fy + 1, bar_x + bar_w, fy + 2, "seek_bar", (bar_x, bar_w, dur))
 
     def render_help_modal(self, h: int, w: int) -> None:
         lines = [
-            "MUSICCTL v2.3 - HYBRID MOUSE + KEYBOARD CONTROLS",
+            "MUSICCTL v2.4 - HYBRID MOUSE + KEYBOARD CONTROLS",
             "",
             "Mouse:",
             "  Click / Double / Right  Select / Play or Open / Enqueue track",
-            "  Click bars / tabs       Seek, set Volume, switch views & focus",
+            "  Click bars / tabs       Seek, Vol slider, Flags, Tabs & Focus",
             "  Mouse wheel             Scroll list or drawer under cursor",
             "",
             "Layout & Navigation:",
             "  h / l or Left / Right   Focus Left List / Right Drawer",
             "  v / z                   Cycle Layout (auto/split/stacked/focus) / Hide Drawer",
-            "  1-7 / U Y I D / Tab     Switch left tabs / Drawer tabs / Cycle (Shift-Tab rev)",
+            "  1-8 / U Y I D / Tab     Switch tabs / Drawer tabs / Cycle (Shift-Tab rev)",
             "  j/k PgUp/PgDn g/G       Move/page cursor in active focused pane",
-            "  / or Ctrl-S (Ctrl-U clr)Focus search | C Cat  T Type  L LocalGroup  Bksp Back",
+            "  / or Ctrl-S (Ctrl-U clr)Search tab & input | C Cat  T Type  L LocalGroup  Bksp Back",
             "",
             "Playback, Batch & Queue:",
             "  Enter / a / f / r / d   Play or Jump / Enqueue / Fav / Radio / Download",
@@ -1952,22 +1781,29 @@ class SovereignDashboard:
             self.stdscr.refresh()
             return
 
-        self.render_header(w)
-        self.render_search_bar(w)
-
-        layout = compute_layout(h, w, getattr(self, "layout_mode", "auto"), getattr(self, "show_drawer", True))
+        show_search = self.active_tab == "search" or getattr(self, "search_focus", False)
+        layout = compute_rmpc_layout(
+            h,
+            w,
+            getattr(self, "layout_mode", "auto"),
+            getattr(self, "show_drawer", True),
+            search_bar=show_search,
+        )
         self.last_layout = layout
         if layout["drawer"] is None and getattr(self, "focus_pane", "list") == "drawer":
             self.focus_pane = "list"
 
-        if layout["now_playing"] is not None:
-            self.render_now_playing_card(*layout["now_playing"])
+        self.render_rmpc_header(layout)
+        self.render_rmpc_tabs(layout)
+        if layout["search_bar"] is not None:
+            sy, _sh, _sx, sw = layout["search_bar"]
+            self.render_search_bar(sy, sw)
+
         self.render_left_pane(*layout["list"])
         if layout["drawer"] is not None:
             self.render_drawer_card(*layout["drawer"])
 
-        deck_h = 4
-        self.render_transport_deck(h - deck_h, w)
+        self.render_rmpc_footer(layout)
         if self.show_help:
             self.render_help_modal(h, w)
         self.stdscr.refresh()
@@ -2315,6 +2151,8 @@ class SovereignDashboard:
         if ch in (ord("q"), 3):
             return False
         if ch in (ord("/"), 19):  # / or Ctrl-S
+            if self.active_tab != "search":
+                self.handle_action("tab", "search")
             self.search_focus = True
         elif ch == 12:  # Ctrl-L clears search query
             self.search_query = ""
@@ -2433,19 +2271,27 @@ class SovereignDashboard:
             self.handle_action("rtab", "info")
         elif ch == ord("D"):
             self.handle_action("rtab", "downloads")
-        elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
+        elif ch in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7"), ord("8")):
             idx = ch - ord("1")
             if getattr(self, "focus_pane", "list") == "drawer" and idx < len(self.RIGHT_TABS):
                 self.handle_action("rtab", self.RIGHT_TABS[idx][0])
-            else:
+            elif idx < len(self.TABS):
                 self.focus_pane = "list"
                 self.handle_action("tab", self.TABS[idx][0])
-        elif ch == 9:  # Tab cycles right sub-tabs
-            cur_r = next((i for i, (k, _) in enumerate(self.RIGHT_TABS) if k == self.right_tab), 0)
-            self.handle_action("rtab", self.RIGHT_TABS[(cur_r + 1) % len(self.RIGHT_TABS)][0])
+        elif ch == 9:  # Tab cycles active pane tabs
+            if getattr(self, "focus_pane", "list") == "drawer":
+                cur_r = next((i for i, (k, _) in enumerate(self.RIGHT_TABS) if k == self.right_tab), 0)
+                self.handle_action("rtab", self.RIGHT_TABS[(cur_r + 1) % len(self.RIGHT_TABS)][0])
+            else:
+                cur_t = next((i for i, (k, _) in enumerate(self.TABS) if k == self.active_tab), 0)
+                self.handle_action("tab", self.TABS[(cur_t + 1) % len(self.TABS)][0])
         elif ch == getattr(curses, "KEY_BTAB", 353):
-            cur_r = next((i for i, (k, _) in enumerate(self.RIGHT_TABS) if k == self.right_tab), 0)
-            self.handle_action("rtab", self.RIGHT_TABS[(cur_r - 1) % len(self.RIGHT_TABS)][0])
+            if getattr(self, "focus_pane", "list") == "drawer":
+                cur_r = next((i for i, (k, _) in enumerate(self.RIGHT_TABS) if k == self.right_tab), 0)
+                self.handle_action("rtab", self.RIGHT_TABS[(cur_r - 1) % len(self.RIGHT_TABS)][0])
+            else:
+                cur_t = next((i for i, (k, _) in enumerate(self.TABS) if k == self.active_tab), 0)
+                self.handle_action("tab", self.TABS[(cur_t - 1) % len(self.TABS)][0])
         return True
 
     def run(self) -> None:

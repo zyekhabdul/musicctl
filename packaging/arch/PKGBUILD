@@ -29,7 +29,7 @@ package() {
     cd "$srcdir/$pkgname-$pkgver"
 
     install -Dm755 bin/musicctl "$pkgdir/usr/bin/musicctl"
-    for f in common.py catalog.py providers.py downloader.py library.py tui.py mpv_hooks.lua; do
+    for f in common.py catalog.py providers.py downloader.py library.py tui_widgets.py tui.py mpv_hooks.lua; do
         install -Dm644 "lib/$f" "$pkgdir/usr/lib/musicctl/$f"
     done
     install -Dm644 completions/musicctl.bash "$pkgdir/usr/share/bash-completion/completions/musicctl"

@@ -43,7 +43,7 @@ ZSH_COMP="${DATA_DIR}/zsh/site-functions/_musicctl"
 DESKTOP_DST="${DATA_DIR}/applications/musicctl.desktop"
 LIB_DST_DIR="${PREFIX}/lib/musicctl"
 LEGACY_LIB_DIR="${DATA_DIR}/musicctl"
-LIB_FILES=(common.py catalog.py providers.py downloader.py library.py tui.py mpv_hooks.lua)
+LIB_FILES=(common.py catalog.py providers.py downloader.py library.py tui_widgets.py tui.py mpv_hooks.lua)
 
 if ((UNINSTALL == 1)); then
   rm -f "${BIN_DIR}/musicctl" "$BASH_COMP" "$ZSH_COMP" "$DESKTOP_DST"

@@ -17,7 +17,7 @@ lint:
 	for file in bin/musicctl install.sh tests/test_musicctl.sh completions/musicctl.bash examples/providers/20-opensubsonic.sh; do \
 		bash -n "$$file"; \
 	done; \
-	python3 -m py_compile lib/common.py lib/catalog.py lib/providers.py lib/downloader.py lib/library.py lib/tui.py tests/test_tui.py; \
+	python3 -m py_compile lib/common.py lib/catalog.py lib/providers.py lib/downloader.py lib/library.py lib/tui_widgets.py lib/tui.py tests/test_tui.py; \
 	if command -v desktop-file-validate >/dev/null 2>&1; then \
 		desktop-file-validate musicctl.desktop; \
 	fi; \

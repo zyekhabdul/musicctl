@@ -153,14 +153,14 @@
 ## 4. Planned Work Packet 4 (`v2.4.0`: `rmpc`-Inspired TUI Architecture, First-Class Entity Navigation & Hybrid Ergonomics)
 
 - **Track**: Track B / Spec-Driven Incremental Delivery (Zero-Bloat CLI & TUI)
-- **Status**: PLANNED [0/5 CHUNKS]
+- **Status**: IN PROGRESS [1/5 CHUNKS]
 - **Reference Blueprint**: User's `rmpc` layout & theme (`~/.config/rmpc/config.ron` + `~/.config/rmpc/theme.ron` on `foot` + `yambar`)
 - **Primary Problems Solved**:
   1. Eliminate dead `[Songs|Albums|Artists|Lists]` search-scope pills leaking onto non-search tabs (previously mutating `self.search_type` with a toast only and zero view/search update).
   2. Replace crowded 2-row 16-button footer & truncated single-line list with clean `rmpc`-style 3-box header, first-class entity tabs, 35/65 split `AlbumArt + Lyrics | 4-Column Table`, and minimal 1-row progress footer.
   3. Keep `~/.local/bin/musicctl` and `~/.local/share/musicctl/` synced via `./install.sh` so runtime matches repo HEAD.
 
-### [ ] Chunk WP4A: `rmpc`-Style Frame, 3-Box Header, Tab Bar & Minimal Footer (`lib/tui.py`)
+### [x] Chunk WP4A: `rmpc`-Style Frame, 3-Box Header, Tab Bar & Minimal Footer (`lib/tui_widgets.py`, `lib/tui.py`)
 - **Target Files**: `lib/tui.py`
 - **Steps**:
   1. Replace the old top header + 2-row 16-button transport footer with `rmpc`-style chrome using rounded borders and clean box junctions (`┬`/`┴`/`├`/`┤`):
