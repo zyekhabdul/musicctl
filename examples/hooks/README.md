@@ -6,7 +6,7 @@
 
 - Direct hook executable: `$MUSICCTL_HOOKS_DIR/<event>` (for example `~/.config/musicctl/hooks/on-track-change`)
 - Drop-in directory scripts: `$MUSICCTL_HOOKS_DIR/<event>.d/*` (executed in lexical order)
-- Every hook receives a single JSON object on **stdin** and runs detached with a **3-second timeout**. Slow or failing hooks never block or fail playback or downloads.
+- Every hook receives a single JSON object on **stdin**. `on-track-change` runs detached via `mpv` (`command_native_async`), while `on-download-complete` runs per downloaded track with a strict **3-second timeout** and ignored errors so slow or failing hooks never fail playback or downloads.
 
 ## Events
 

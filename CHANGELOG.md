@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.4.1 (2026-11-26)
+
+- **TUI UX Clarity & Header Cleanup (`lib/tui.py`, `lib/tui_widgets.py`)**: Added DI constructor for `SovereignDashboard`, honest mode pill (`NORMAL`/`INPUT`), drill-down context bar, readable header/timeline/hints, and `format_header_title` to strip upload noise and duplicate artist prefixes.
+- **YTM Multi-Artist Metadata & `USER_AGENT` (`lib/catalog.py`, `lib/common.py`)**: Fixed `_extract_ytm_meta_tokens` joining multi-artist InnerTube runs (`&` no longer leaks into `Album`), and bumped `USER_AGENT` to `musicctl/2.4`.
+- **SSOT Consolidation & Dead Code Removal (`lib/common.py`, `lib/catalog.py`, `lib/downloader.py`, `lib/library.py`, `lib/tui_widgets.py`, `bin/musicctl`)**: Unified 4 metadata parsers into `common.parse_meta_fields` (`+ parse-meta` CLI), unified `AUDIO_EXTS` and `format_mmss` (`pad_minutes=False`), routed `_parse_ytm` through `catalog.py parse-stdin --tsv`, and removed WP3 legacy TUI helpers plus unused bash download helpers.
+- **Hardening & Performance (`lib/common.py`, `lib/downloader.py`, `lib/tui.py`, `bin/musicctl`)**: Added `MpvClient.resume_session` `playlist-pos` race recovery, Queue tab `_queue_state_sig()` refresh guard, cached `mpv_supports_soxr` capability probe (`soxr.cap`), strict `string.Formatter` template guard in `render_dest_path`, and `HTTPError` cleanup.
+- **`musicctl fzf` Deprecation & Hook Doc Alignment (`bin/musicctl`, `install.sh`, `packaging/arch/PKGBUILD`, `README.md`, `completions/_musicctl`, `examples/hooks/README.md`)**: Deprecated `musicctl fzf` (scheduled for `v3.0` removal), demoted `fzf` from core to optional dependency, and clarified `on-track-change` (detached) vs `on-download-complete` (3s bounded) hook execution.
+
 ## v2.4.0 (2026-11-26)
 
 - **Modular TUI Widget Architecture & FHS Alignment (`lib/tui_widgets.py`, `bin/musicctl`, `install.sh`, `Makefile`, `packaging/arch/PKGBUILD`)**: Extracted pure layout, table formatting, scrollbar, entity aggregation, and widget helpers into `lib/tui_widgets.py`, moved installed Python/Lua runtime modules to FHS `lib/musicctl/`, and removed duplicate packaging noise.

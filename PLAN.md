@@ -220,3 +220,11 @@
 - Track: Maintenance
 - **Status**: COMPLETED
 - **Scope**: Fix multi-artist YTM InnerTube album parsing (`lib/catalog.py`), normalize TUI header title (`lib/tui_widgets.py`, `lib/tui.py`), bump `USER_AGENT` (`lib/common.py`), remove WP3/bash dead helpers, consolidate 4 metadata parsers into `common.parse_meta_fields`, and deprecate `musicctl fzf` (demoting `fzf` to optional dependency).
+
+---
+
+## 6. Work Packet 5A (`v2.4.1`: Hardening, Performance Polish & Release Sync)
+
+- Track: Maintenance
+- **Status**: COMPLETED
+- **Scope**: Stabilize `MpvClient.resume_session` `playlist-pos` race recovery (`lib/common.py`), guard Queue tab polling with `_queue_state_sig()` (`lib/tui.py`), cache `mpv_supports_soxr` in `bin/musicctl`, consolidate `AUDIO_EXTS`/`format_mmss`/`parse_ytm_search_json` SSOTs, harden `render_dest_path` against attribute/item traversal (`lib/downloader.py`), align `examples/hooks/README.md`, bump `v2.4.1`, and sync Obsidian memory.
