@@ -759,3 +759,50 @@ def aggregate_albums(
         groups_map[key] = tracks
         summary_rows.append((key, disp, f"{artist_lbl} • {len(tracks)} tracks", "[E-ALB]"))
     return summary_rows, groups_map
+
+
+CATALOG_CONTAINER_RE = re.compile(r"^(?:ytm|deezer|itunes):(?:album|artist|playlist):")
+CATALOG_TRACK_RE = re.compile(r"^(?:ytm|deezer|itunes):(?:song|track):")
+GROUP_LIST_TAGS = frozenset({"[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]", "[PL]", "[ART]"})
+
+
+def classify_row(vid: str, tag: str = "") -> str:
+    """Classify a dashboard list row into a canonical routing kind."""
+    v = (vid or "").strip()
+    t = (tag or "").strip()
+    if t in ("[E-ART]", "[E-ALB]") or v.startswith(("eart:", "ealb:")):
+        return "entity_group"
+    if t in ("[L-ART]", "[L-ALB]") or v.startswith(("lart:", "lalb:")):
+        return "local_group"
+    if v.startswith("pl:"):
+        return "playlist"
+    if t in ("[ALB]", "[ART]", "[PL]") or bool(CATALOG_CONTAINER_RE.match(v)):
+        return "catalog_container"
+    if CATALOG_TRACK_RE.match(v):
+        return "catalog_track"
+    if t == "[Q]":
+        return "queue_item"
+    if t == "[LOC]" or v.startswith(("/", "~")):
+        return "local_file"
+    return "track"
+
+
+def is_downloadable_ref(vid: str, tag: str = "") -> bool:
+    """Return True when row references a downloadable remote/playlist target."""
+    v = (vid or "").strip()
+    if not v:
+        return False
+    return classify_row(v, tag) not in ("entity_group", "local_group", "local_file")
+
+
+def calc_queue_art_size(art_rect: tuple[int, int, int, int] | None) -> tuple[int, int] | None:
+    """Compute (tw, th) for the WP4 Queue left Album Art pane, or None when hidden/too small."""
+    if art_rect is None:
+        return None
+    in_h = max(0, art_rect[1] - 1)
+    in_w = max(0, art_rect[3] - 4)
+    if in_h < 4 or in_w < 12:
+        return None
+    th = min(14, in_h)
+    tw = min(in_w, max(12, th * 2 + 2))
+    return (tw, th)

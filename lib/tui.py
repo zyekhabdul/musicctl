@@ -41,6 +41,7 @@ from common import (
     pick_best_lyrics_candidate,
 )
 from tui_widgets import (
+    GROUP_LIST_TAGS,
     LAYOUT_MODES,
     RMPC_TABS,
     SGR_RE,
@@ -54,8 +55,10 @@ from tui_widgets import (
     build_vertical_scrollbar,
     build_volume_slider,
     calc_art_size,
+    calc_queue_art_size,
     calc_seek_target,
     calc_vol_target,
+    classify_row,
     compute_layout,
     compute_rmpc_layout,
     compute_table_col_widths,
@@ -68,6 +71,7 @@ from tui_widgets import (
     format_table_header,
     format_table_row_4col,
     format_track_row_columns,
+    is_downloadable_ref,
     is_placeholder_title,
     merge_fav_and_history,
     parse_ansi_art,
@@ -238,7 +242,20 @@ class SovereignDashboard:
     SEARCH_TYPES = ("songs", "albums", "artists", "playlists")
     LOCAL_GROUP_MODES = ("flat", "artist", "album")
 
-    def __init__(self, stdscr: curses.window, initial_query: str = "") -> None:
+    def __init__(
+        self,
+        stdscr: Any = None,
+        initial_query: str = "",
+        *,
+        bin_path: str | None = None,
+        sock_path: str | None = None,
+        data_dir: Path | None = None,
+        cache_dir: Path | None = None,
+        download_dir: Path | None = None,
+        art_enabled: bool | None = None,
+        mpv: Any = None,
+        dl_manager: Any = None,
+    ) -> None:
         self.stdscr = stdscr
         here = Path(__file__).resolve()
         fallback_bin = next(
@@ -252,14 +269,14 @@ class SovereignDashboard:
             ),
             str(here.parent.parent / "bin" / "musicctl"),
         )
-        self.bin_path = os.environ.get("MUSICCTL_BIN") or fallback_bin
-        self.sock_path = os.environ.get("MUSICCTL_SOCKET") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "musicctl.sock")
-        self.data_dir = Path(os.environ.get("MUSICCTL_DATA_DIR") or os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "musicctl"))
-        self.cache_dir = Path(os.environ.get("MUSICCTL_CACHE_DIR") or os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "musicctl"))
-        self.download_dir = Path(os.environ.get("MUSICCTL_DOWNLOAD_DIR") or os.path.expanduser("~/Music/musicctl"))
-        self.art_enabled = os.environ.get("MUSICCTL_ART", "1") == "1"
+        self.bin_path = bin_path or os.environ.get("MUSICCTL_BIN") or fallback_bin
+        self.sock_path = sock_path or os.environ.get("MUSICCTL_SOCKET") or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "musicctl.sock")
+        self.data_dir = Path(data_dir) if data_dir is not None else Path(os.environ.get("MUSICCTL_DATA_DIR") or os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "musicctl"))
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else Path(os.environ.get("MUSICCTL_CACHE_DIR") or os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "musicctl"))
+        self.download_dir = Path(download_dir) if download_dir is not None else Path(os.environ.get("MUSICCTL_DOWNLOAD_DIR") or os.path.expanduser("~/Music/musicctl"))
+        self.art_enabled = (os.environ.get("MUSICCTL_ART", "1") == "1") if art_enabled is None else bool(art_enabled)
 
-        self.mpv = MpvClient(self.sock_path)
+        self.mpv = mpv if mpv is not None else MpvClient(self.sock_path)
         self.lock = threading.Lock()
         self.ui_events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
 
@@ -297,7 +314,7 @@ class SovereignDashboard:
         self.selected_idx = 0
         self.scroll_top = 0
 
-        self.dl_manager = DownloadManager(self.bin_path, self.ui_events)
+        self.dl_manager = dl_manager if dl_manager is not None else DownloadManager(self.bin_path, self.ui_events)
         self.dl_jobs: list[dict[str, Any]] = []
 
         self.mpv_state: dict[str, Any] = {}
@@ -1075,20 +1092,32 @@ class SovereignDashboard:
                 self.lyrics_header = ""
                 self.drawer_scroll = 0
                 self.drawer_sel = 0
-                np_rect = getattr(self, "last_layout", {}).get("now_playing")
-                art_sz = calc_art_size(np_rect[1], np_rect[3]) if np_rect else (22, 10)
+                art_sz = calc_queue_art_size(getattr(self, "last_layout", {}).get("art"))
                 if art_sz:
                     self.ensure_art_async(vid, art_sz[0], art_sz[1])
                 if self.active_tab == "queue":
                     self.load_tab_items()
 
-            if not idle and cur_path and self.right_tab == "lyrics" and self.lyrics_track_key != cur_path and not self.lyrics_loading:
+            if not idle and cur_path and self.is_lyrics_visible() and self.lyrics_track_key != cur_path and not self.lyrics_loading:
                 if is_placeholder_title(title, vid):
                     self.lyrics_header = "Waiting for track metadata..."
                 else:
                     self.fetch_lyrics_async(title, cur_path, artist=artist, duration=dur)
         else:
             self.mpv_state = {}
+
+    def is_lyrics_visible(self) -> bool:
+        """Return True when lyrics are rendered in the active tab, Queue split, or drawer."""
+        if self.active_tab == "lyrics" and not getattr(self, "nav_stack", None):
+            return True
+        layout = getattr(self, "last_layout", {}) or {}
+        if layout.get("lyrics") is not None:
+            return True
+        if layout.get("drawer") is not None and getattr(self, "right_tab", "upnext") == "lyrics":
+            return True
+        if not layout and getattr(self, "right_tab", "upnext") == "lyrics":
+            return True
+        return False
 
     def safe_addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.stdscr.getmaxyx()
@@ -1413,9 +1442,9 @@ class SovereignDashboard:
             in_h = max(0, ah - 1)
             in_w = max(0, aw - 4)
             art_rows: list[list[tuple[str, int, int]]] = []
-            if self.art_enabled and VIDEO_ID_RE.match(art_vid) and in_h >= 4 and in_w >= 12:
-                th = min(14, in_h)
-                tw = min(in_w, max(12, th * 2 + 2))
+            art_sz = calc_queue_art_size(art_rect)
+            if self.art_enabled and VIDEO_ID_RE.match(art_vid) and art_sz is not None:
+                tw, th = art_sz
                 self.ensure_art_async(art_vid, tw, th)
                 with self.lock:
                     art_rows = self.art_cache.get(f"{art_vid}:{tw}x{th}", [])
@@ -1497,9 +1526,7 @@ class SovereignDashboard:
             self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
             return
 
-        is_group_list = bool(
-            self.tracks and self.tracks[0][3] in ("[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]", "[PL]", "[ART]")
-        )
+        is_group_list = bool(self.tracks and self.tracks[0][3] in GROUP_LIST_TAGS)
         use_4col = w >= 63 and h >= 6 and not is_group_list
         inner_w = max(1, w - 2)
         prefix_w = 6  # "▸ 1.* "
@@ -1561,97 +1588,6 @@ class SovereignDashboard:
 
         self._draw_scrollbar_col(x0 + w - 1, body_y, len(self.tracks), body_h, self.scroll_top, border_attr)
         self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
-
-    def render_now_playing_card(self, y0: int, h: int, x0: int, w: int) -> None:
-        if w < 24 or h < 4:
-            return
-        self.safe_addstr(y0, x0, "╭" + "─" * max(0, w - 2) + "╮", curses.color_pair(PAIR_BOX))
-        self.safe_addstr(y0, x0 + 2, " NOW PLAYING ", curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
-        for r in range(1, h - 1):
-            self.safe_addstr(y0 + r, x0, "│", curses.color_pair(PAIR_BOX))
-            self.safe_addstr(y0 + r, x0 + w - 1, "│", curses.color_pair(PAIR_BOX))
-        self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", curses.color_pair(PAIR_BOX))
-
-        idle = not self.mpv_state or bool(self.mpv_state.get("idle-active", True))
-        paused = bool(self.mpv_state.get("pause", False))
-        cur_path = str(self.mpv_state.get("path") or "")
-        cur_vid = extract_video_id(cur_path) if cur_path else ""
-        sel_vid = self.tracks[self.selected_idx][0] if self.tracks and self.selected_idx < len(self.tracks) else ""
-        art_vid = cur_vid if VIDEO_ID_RE.match(cur_vid) else sel_vid
-
-        art_rows: list[list[tuple[str, int, int]]] = []
-        art_sz = calc_art_size(h, w)
-        if self.art_enabled and VIDEO_ID_RE.match(art_vid) and art_sz is not None:
-            aw, ah = art_sz
-            cache_key = f"{art_vid}:{aw}x{ah}"
-            self.ensure_art_async(art_vid, aw, ah)
-            with self.lock:
-                art_rows = self.art_cache.get(cache_key, [])
-
-        info_x = x0 + 2
-        if art_rows and art_sz is not None:
-            self.reset_art_pairs_for_vid(art_vid)
-            art_w = min(art_sz[0], max(len(r) for r in art_rows))
-            for ri, row_cells in enumerate(art_rows[: max(1, h - 2)]):
-                for ci, (ch, fg, bg) in enumerate(row_cells[:art_w]):
-                    try:
-                        self.stdscr.addstr(y0 + 1 + ri, x0 + 2 + ci, ch, curses.color_pair(self.get_art_pair(fg, bg)))
-                    except curses.error:
-                        pass
-            info_x = x0 + 3 + art_w
-
-        info_w = max(8, x0 + w - 2 - info_x)
-        if not idle:
-            title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "Unknown")
-            meta_fields = extract_metadata_fields(self.mpv_state.get("metadata"))
-            artist = meta_fields["artist"]
-            alb_lbl = format_album_line(meta_fields["album"], meta_fields["year"])
-            codec = str(self.mpv_state.get("audio-codec-name") or "-")
-            srate = self.mpv_state.get("audio-params/samplerate") or 0
-            sfmt = str(self.mpv_state.get("audio-params/format") or "")
-            audio_lbl = format_audio_badge(codec, srate, sfmt) or codec
-            qpos = int(self.mpv_state.get("playlist-pos") or 0) + 1
-            qcnt = int(self.mpv_state.get("playlist-count") or 1)
-            spd_lbl = format_speed(self.mpv_state.get("speed"))
-            loop_mode = self.get_loop_mode()
-
-            head_txt = title if (not artist or h > 5) else f"{title} — {artist}"
-            self.safe_addstr(y0 + 1, info_x, truncate_width(head_txt, info_w), curses.color_pair(PAIR_TITLE) | curses.A_BOLD)
-            row_off = 2
-            max_row = h - 2
-            if artist and h > 5 and row_off < max_row:
-                art_txt = f"by {artist}" if (not alb_lbl or h >= 8) else f"by {artist} • {alb_lbl}"
-                self.safe_addstr(y0 + row_off, info_x, truncate_width(art_txt, info_w), curses.color_pair(PAIR_PURPLE) | curses.A_BOLD)
-                row_off += 1
-            if alb_lbl and h >= 8 and row_off < max_row:
-                self.safe_addstr(y0 + row_off, info_x, truncate_width(f"Album: {alb_lbl}", info_w), curses.color_pair(PAIR_ICE))
-                row_off += 1
-            if row_off < max_row:
-                self.safe_addstr(y0 + row_off, info_x, truncate_width(f"Audio: {audio_lbl}  |  Queue: {qpos}/{qcnt}", info_w), curses.color_pair(PAIR_CYAN))
-                row_off += 1
-            if h >= 7 and row_off < max_row:
-                dsp_line = f"EQ: {self.eq_mode}  |  Norm: {'on' if self.norm_on else 'off'}  |  Loop: {loop_mode}"
-                self.safe_addstr(y0 + row_off, info_x, truncate_width(dsp_line, info_w), curses.color_pair(PAIR_ICE))
-                row_off += 1
-            extra_parts: list[str] = []
-            if spd_lbl:
-                extra_parts.append(f"Speed: {spd_lbl}")
-            if self.sleep_rem:
-                extra_parts.append(f"Sleep: {self.sleep_rem}")
-            if extra_parts and row_off < max_row:
-                self.safe_addstr(y0 + row_off, info_x, truncate_width("  |  ".join(extra_parts), info_w), curses.color_pair(PAIR_AMBER))
-                row_off += 1
-
-            spec_y = y0 + h - 2
-            if spec_y >= y0 + row_off:
-                wave = build_lightweight_wave(info_w, self.tick, paused)
-                self.safe_addstr(spec_y, info_x, wave, curses.color_pair(PAIR_DIM if paused else PAIR_SPEC_HIGH))
-        else:
-            self.safe_addstr(y0 + 1, info_x, "No active playback", curses.color_pair(PAIR_DIM) | curses.A_BOLD)
-            if h >= 5:
-                self.safe_addstr(y0 + 2, info_x, truncate_width("Enter / Double-click track to play | ? Help", info_w), curses.color_pair(PAIR_DIM))
-            if h >= 6:
-                self.safe_addstr(y0 + 3, info_x, truncate_width(f"EQ: {self.eq_mode}  |  Norm: {'on' if self.norm_on else 'off'}", info_w), curses.color_pair(PAIR_ICE))
 
     def render_drawer_card(self, y0: int, h: int, x0: int, w: int) -> None:
         if w < 24 or h < 4:
@@ -1823,14 +1759,6 @@ class SovereignDashboard:
 
         self.safe_addstr(y0 + h - 1, x0, "╰" + "─" * max(0, w - 2) + "╯", border_attr)
 
-    def render_right_pane(self, y0: int, h: int, x0: int, w: int) -> None:
-        if w < 24 or h < 8:
-            return
-        top_h = min(15, max(8, int(h * 0.36)))
-        bot_h = max(4, h - top_h)
-        self.render_now_playing_card(y0, top_h, x0, w)
-        self.render_drawer_card(y0 + top_h, bot_h, x0, w)
-
     def render_rmpc_footer(self, layout: dict[str, Any]) -> None:
         fy, fh, _fx0, fw = layout["footer"]
         _, _, _mx0, mw = layout["footer_mode"]
@@ -1994,25 +1922,20 @@ class SovereignDashboard:
             "",
             "Mouse:",
             "  Click / Double / Right  Select / Play or Open / Enqueue track",
-            "  Header / Tabs / Footer  Play pill, Vol slider, Flags, Tabs, Seek bar",
-            "  Mouse wheel             Scroll list, Queue lyrics, drawer, or modal under cursor",
+            "  Bars / Tabs / Wheel     Header pills, Vol, Seek, Tabs / Scroll pane",
             "",
             "Layout & Navigation:",
-            "  1-8 / Tab / Shift-Tab   Switch tabs (1 Queue .. 8 Lyrics) / reverse",
-            "  h / l or Left / Right   Focus Left List / Queue Lyrics or Side Drawer",
-            "  j/k PgUp/PgDn C-U/D g/G Move, page, or jump cursor in focused pane/modal",
-            "  v / z                   Cycle Layout (auto/split/stacked/focus) / Toggle Side Pane",
-            "  D / I (Esc or q close)  Downloads / Track Info overlay modal (U/Y drawer)",
-            "  / or C-S (C-L clr)      Search tab & input | C Cat  T Type  L LocalGroup  Bksp Back",
+            "  1-8 / Tab / Shift-Tab   Tabs (1 Queue .. 8 Lyrics) / reverse",
+            "  h/l j/k PgUp/Dn C-U/D   Focus pane / Move, page, g/G top-end",
+            "  v / z / D / I (Esc)     Cycle layout / Side pane / DL & Info modals",
+            "  / C-S (C-L)  C  T  L    Search | Catalog / Scope / LocalGrp | Bksp",
             "",
             "Playback, Batch & Queue:",
-            "  Space / p               Play / Pause",
-            "  < / >  or  b / n        Previous / Next track",
-            "  , / .  or  - / +        Volume -5% / +5%   |  [/] Seek -/+10s  |  s / x Stop",
-            "  Enter / a / f / r / d   Play or Open / Enqueue / Fav / Radio / Download",
-            "  P / E / W / S / X       Play All / +Q All / DL All / Sync Pl / Cancel DL",
-            "  J / K (on Queue tab)    Move selected queue track down / up",
-            "  o Loop  u Shuf  Q Qual  e EQ  N Norm  A Auto  m Mute  ? Help  q Quit",
+            "  Space / p   < / >       Play-Pause | Prev / Next (also b / n)",
+            "  , / . (-/+) [/] s / x   Vol -/+5% | Seek -/+10s | Stop daemon",
+            "  Ent / a / f / r / d     Play or Open / +Q / Fav / Radio / Download",
+            "  P / E / W / S / X       Play All / +Q All / DL All / Sync / Cancel",
+            "  J/K  o u Q e N A m ? q  Move | Loop Shuf Qual EQ Norm Auto Mute ? q",
         ]
         mw = min(w - 4, max(len(l) for l in lines) + 4)
         mh = min(h - 2, len(lines) + 2)
@@ -2082,11 +2005,19 @@ class SovereignDashboard:
         return rows
 
     def _collect_track_refs(self) -> list[str]:
-        refs: list[str] = []
-        for vid, _t, _m, tag in self.tracks:
-            if vid and tag not in ("[ALB]", "[ART]", "[PL]", "[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]"):
-                refs.append(vid)
-        return refs
+        return [
+            vid
+            for vid, _t, _m, tag in self.tracks
+            if vid and classify_row(vid, tag) not in ("entity_group", "local_group", "catalog_container", "playlist")
+        ]
+
+    def _focus_downloads_view(self, toast: str = "") -> None:
+        self.right_tab = "downloads"
+        if toast:
+            self.set_toast(toast)
+        layout = getattr(self, "last_layout", None)
+        if layout and layout.get("drawer") is None:
+            self.active_modal = "downloads"
 
     def _ensure_lyrics_for_current(self) -> None:
         title = str(self.mpv_state.get("media-title") or "")
@@ -2110,27 +2041,24 @@ class SovereignDashboard:
         if not self.tracks or self.selected_idx >= len(self.tracks):
             return
         vid, title, meta, tag = self.tracks[self.selected_idx]
-        if tag in ("[E-ART]", "[E-ALB]") or vid.startswith(("eart:", "ealb:")):
+        kind = classify_row(vid, tag)
+        if kind == "entity_group":
             rows = getattr(self, "_entity_groups", {}).get(vid, [])
             self.push_nav(title, rows, context_ref=vid, kind="entity_group")
-            return
-        if tag in ("[L-ART]", "[L-ALB]"):
+        elif kind == "local_group":
             rows = self._local_group_to_rows(vid)
             self.push_nav(title, rows, context_ref=vid, kind="local_group")
-            return
-        if vid.startswith("pl:"):
+        elif kind == "playlist":
             pl_name = vid[3:]
             rows = self.read_tsv(self.data_dir / "playlists" / f"{pl_name}.tsv", "[TRK]")
             self.push_nav(pl_name, rows, context_ref=vid, kind="playlist")
-            return
-        if tag in ("[ALB]", "[ART]", "[PL]") or re.match(r"^(?:ytm|deezer|itunes):(?:album|artist|playlist):", vid):
+        elif kind == "catalog_container":
             self.trigger_browse(vid, title)
-            return
-        if tag == "[Q]":
+        elif kind == "queue_item":
             self.mpv.send(["set_property", "playlist-pos", self.selected_idx])
             self.mpv.send(["set_property", "pause", False])
             self.set_toast(f"Jump #{self.selected_idx + 1}")
-        elif re.match(r"^(?:ytm|deezer|itunes):(?:song|track):", vid):
+        elif kind == "catalog_track":
             self.run_cli_async(["play", vid], toast=f"Playing: {title[:24]}", reload_after=True)
         else:
             line = f"{vid}\t{title}\t{meta}\t{tag}"
@@ -2140,21 +2068,20 @@ class SovereignDashboard:
         if not self.tracks or self.selected_idx >= len(self.tracks):
             return
         vid, title, meta, tag = self.tracks[self.selected_idx]
-        if tag in ("[E-ART]", "[E-ALB]") or vid.startswith(("eart:", "ealb:")):
+        kind = classify_row(vid, tag)
+        if kind == "entity_group":
             refs = [r[0] for r in getattr(self, "_entity_groups", {}).get(vid, []) if r[0]]
             if refs:
                 self.run_cli_batch_async([["add", r] for r in refs], toast=f"Queued {len(refs)} tracks", reload_after=True)
-            return
-        if tag in ("[L-ART]", "[L-ALB]") or vid.startswith(("lart:", "lalb:")):
+        elif kind == "local_group":
             paths = [str(e.get("path") or "") for e in getattr(self, "_local_groups", {}).get(vid, []) if e.get("path")]
             if paths:
                 self.run_cli_batch_async([["add", p] for p in paths], toast=f"Queued {len(paths)} tracks", reload_after=True)
-            return
-        if vid.startswith("pl:") or tag in ("[ALB]", "[ART]", "[PL]") or re.match(r"^(?:ytm|deezer|itunes):(?:song|track|album|artist|playlist):", vid):
+        elif kind in ("playlist", "catalog_container", "catalog_track"):
             self.run_cli_async(["add", vid], toast=f"Queued: {title[:24]}", reload_after=True)
-            return
-        line = f"{vid}\t{title}\t{meta}\t{tag}"
-        self.run_cli_async(["_add_line", line], toast=f"Queued: {title[:24]}", reload_after=True)
+        else:
+            line = f"{vid}\t{title}\t{meta}\t{tag}"
+            self.run_cli_async(["_add_line", line], toast=f"Queued: {title[:24]}", reload_after=True)
 
     def handle_action(self, action: str, payload: Any, bstate: int = 0) -> None:
         if action == "noop":
@@ -2212,9 +2139,20 @@ class SovereignDashboard:
                 self.run_cli_batch_async(cmds, toast=f"Queued {len(refs)} tracks", reload_after=True)
         elif action == "dl_all":
             ctx = getattr(self, "drill_ref", "")
-            if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")) and getattr(self, "dl_manager", None):
-                self.dl_manager.start([ctx], label=self.drill_title or ctx)
-                self.right_tab = "downloads"
+            ctx_kind = classify_row(ctx, "") if ctx else ""
+            dl_mgr = getattr(self, "dl_manager", None)
+            if ctx and ctx_kind in ("playlist", "catalog_container"):
+                if dl_mgr:
+                    dl_mgr.start([ctx], label=self.drill_title or ctx)
+                self._focus_downloads_view(f"Downloading: {(self.drill_title or ctx)[:24]}")
+            else:
+                refs = [vid for vid, _t, _m, tag in self.tracks if is_downloadable_ref(vid, tag)]
+                if not refs:
+                    self.set_toast("Already local")
+                else:
+                    if dl_mgr:
+                        dl_mgr.start(refs, label=self.drill_title or f"{len(refs)} tracks")
+                    self._focus_downloads_view(f"Downloading {len(refs)} track(s)")
         elif action == "sync_pl":
             target = ""
             if getattr(self, "drill_kind", "") == "playlist" and getattr(self, "drill_ref", "").startswith("pl:"):
@@ -2227,8 +2165,7 @@ class SovereignDashboard:
                 pl_name = target[3:]
                 if getattr(self, "dl_manager", None):
                     self.dl_manager.start(["sync", target], label=f"Sync {pl_name}")
-                    self.right_tab = "downloads"
-                    self.set_toast(f"Syncing {pl_name}...")
+                    self._focus_downloads_view(f"Syncing {pl_name}...")
                 else:
                     self.run_cli_async(["dl", "sync", target], toast=f"Synced {pl_name}", reload_after=True, timeout=300.0)
         elif action == "dl_cancel":
@@ -2348,11 +2285,24 @@ class SovereignDashboard:
         elif action == "dl_sel":
             if self.tracks and self.selected_idx < len(self.tracks):
                 vid, title, _m, tag = self.tracks[self.selected_idx]
-                if tag in ("[L-ART]", "[L-ALB]", "[LOC]") or vid.startswith(("lart:", "lalb:")):
+                kind = classify_row(vid, tag)
+                if kind in ("local_group", "local_file"):
                     self.set_toast("Already local")
                     return
-                if getattr(self, "dl_manager", None):
-                    self.dl_manager.start([vid], label=title or vid)
+                dl_mgr = getattr(self, "dl_manager", None)
+                if kind == "entity_group":
+                    refs = [r[0] for r in getattr(self, "_entity_groups", {}).get(vid, []) if is_downloadable_ref(r[0], r[3])]
+                    if not refs:
+                        self.set_toast("Already local")
+                        return
+                    if dl_mgr:
+                        dl_mgr.start(refs, label=title or vid)
+                        self.set_toast(f"Downloading {len(refs)} track(s): {title[:20]}")
+                    else:
+                        self.run_cli_async(["download", *refs], toast="Download complete", reload_after=True, timeout=300.0)
+                    return
+                if dl_mgr:
+                    dl_mgr.start([vid], label=title or vid)
                     self.set_toast(f"Downloading ({self.quality_mode}): {title[:20]}")
                 else:
                     self.set_toast(f"Downloading ({self.quality_mode})...")

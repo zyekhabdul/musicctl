@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -196,6 +197,8 @@ def prepare_square_cover(
                 tmp_art = cache_art_dir / f".{safe_id}.{threading.get_ident()}.tmp"
                 tmp_art.write_bytes(data)
                 tmp_art.replace(art_file)
+        except urllib.error.HTTPError as exc:
+            exc.close()
         except Exception:
             pass
 
@@ -502,10 +505,26 @@ def _resolve_current_track(sock_path: str) -> dict[str, Any]:
     )
 
 
+def _is_explicit_ref(tok: str) -> bool:
+    return bool(
+        common.VIDEO_ID_RE.match(tok)
+        or catalog.parse_ref(tok) is not None
+        or re.match(r"^https?://", tok, re.I)
+        or tok.startswith("pl:")
+    )
+
+
 def resolve_download_targets(targets: list[str], data_dir: Path, sock_path: str) -> list[dict[str, Any]]:
     """Resolve CLI targets (current, pl:<name>, catalog refs, URLs, queries) into tracks."""
     if not targets or targets == ["current"]:
         return [_resolve_current_track(sock_path)]
+
+    clean_tokens = [t.strip() for t in targets if t and t.strip()]
+    if len(clean_tokens) > 1 and all(_is_explicit_ref(tok) for tok in clean_tokens):
+        batch_rows: list[dict[str, Any]] = []
+        for tok in clean_tokens:
+            batch_rows.extend(resolve_download_targets([tok], data_dir, sock_path))
+        return batch_rows
 
     joined = " ".join(targets).strip()
     if joined.startswith("pl:"):
