@@ -3882,5 +3882,99 @@ class TestClickableLinksAndHints(unittest.TestCase):
             self.assertIn("a +Queue All", hint_row_text)
             self.assertIn("d Download", hint_row_text)
 
+    def test_ytm_browse_filters_recommendation_carousels(self):
+        album_with_recs = {
+            "header": {
+                "musicResponsiveHeaderRenderer": {
+                    "title": {"runs": [{"text": "When We Were Younger"}]},
+                    "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "2023"}]},
+                    "straplineTextOne": {"runs": [{"text": "grentperez"}]},
+                }
+            },
+            "contents": {
+                "musicShelfRenderer": {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "index": {"runs": [{"text": "1"}]},
+                                "playlistItemData": {"videoId": "oWUfHMKPcUU"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "When We Were Younger (Intro)"}]}}},
+                                ],
+                            }
+                        }
+                    ]
+                },
+                "musicCarouselShelfRenderer": {
+                    "header": {
+                        "musicCarouselShelfBasicHeaderRenderer": {
+                            "title": {"runs": [{"text": "Releases for you"}]}
+                        }
+                    },
+                    "contents": [
+                        {
+                            "musicTwoRowItemRenderer": {
+                                "title": {"runs": [{"text": "A Perfect Little Death"}]},
+                                "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "Eleri Ward"}]},
+                                "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_8IS5Ia0hgTp"}},
+                            }
+                        }
+                    ],
+                },
+            },
+        }
+        alb = catalog.parse_ytm_browse(album_with_recs, "MPREb_OQe9e9LtuOu")
+        self.assertEqual(len(alb["items"]), 1)
+        self.assertEqual(alb["items"][0]["id"], "oWUfHMKPcUU")
+        self.assertEqual(alb["items"][0]["type"], "song")
+
+        artist_with_recs = {
+            "header": {
+                "musicImmersiveHeaderRenderer": {
+                    "title": {"runs": [{"text": "grentperez"}]},
+                }
+            },
+            "contents": [
+                {
+                    "musicCarouselShelfRenderer": {
+                        "header": {
+                            "musicCarouselShelfBasicHeaderRenderer": {
+                                "title": {"runs": [{"text": "Albums"}]}
+                            }
+                        },
+                        "contents": [
+                            {
+                                "musicTwoRowItemRenderer": {
+                                    "title": {"runs": [{"text": "When We Were Younger"}]},
+                                    "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "2023"}]},
+                                    "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_OQe9e9LtuOu"}},
+                                }
+                            }
+                        ],
+                    }
+                },
+                {
+                    "musicCarouselShelfRenderer": {
+                        "header": {
+                            "musicCarouselShelfBasicHeaderRenderer": {
+                                "title": {"runs": [{"text": "Fans might also like"}]}
+                            }
+                        },
+                        "contents": [
+                            {
+                                "musicTwoRowItemRenderer": {
+                                    "title": {"runs": [{"text": "Laufey"}]},
+                                    "subtitle": {"runs": [{"text": "Artist"}]},
+                                    "navigationEndpoint": {"browseEndpoint": {"browseId": "UClaufey1234567890"}},
+                                }
+                            }
+                        ],
+                    }
+                },
+            ],
+        }
+        art = catalog.parse_ytm_browse(artist_with_recs, "UC3CyxyxdZLGrcpHUuaZolVw")
+        self.assertEqual([x["id"] for x in art["items"]], ["MPREb_OQe9e9LtuOu"])
+
 if __name__ == "__main__":
     unittest.main()
