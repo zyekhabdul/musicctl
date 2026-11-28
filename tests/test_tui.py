@@ -4079,6 +4079,90 @@ class TestClickableLinksAndHints(unittest.TestCase):
             q_hb = next(h for h in d.hitboxes if h.y0 == fy and h.action == "tab" and h.payload == "queue")
             self.assertEqual(self._resolve_hb(d.hitboxes, (q_hb.x0 + q_hb.x1) // 2, q_hb.y0).payload, "queue")
 
+    def test_lyrics_artist_upgrade_race_header_album_and_queue_current_marker(self):
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            scr = self._make_scr(36, 120)
+
+            state = {
+                "idle-active": False,
+                "pause": False,
+                "path": "https://www.youtube.com/watch?v=bcd7r2ueJcQ",
+                "media-title": "Stuck On You",
+                "metadata": {},
+                "duration": 0.0,
+                "playlist": [
+                    {"filename": "https://www.youtube.com/watch?v=sOTSMrC4zio", "current": False},
+                    {"filename": "https://www.youtube.com/watch?v=bcd7r2ueJcQ", "current": True},
+                ],
+            }
+
+            class StubMpv:
+                def batch_get(self, _props):
+                    return dict(state)
+
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=data_dir,
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=StubMpv(),  # type: ignore[arg-type]
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.active_tab = "queue"
+            d.last_layout = tui.compute_rmpc_layout(36, 120, "auto", True, active_tab="queue")
+
+            calls: list[tuple[str, str, str, float]] = []
+
+            def fake_fetch(title: str, tk: str, artist: str = "", duration: float = 0.0) -> None:
+                d.lyrics_track_key = tk
+                d.lyrics_artist = artist.strip()
+                d.lyrics_seq += 1
+                d.lyrics_loading = True
+                calls.append((title, tk, artist, duration))
+
+            d.fetch_lyrics_async = fake_fetch  # type: ignore[method-assign]
+
+            # Poll 1: force-media-title exists before mpv metadata arrives -> artist=""
+            d.poll_mpv()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2], "")
+            seq_stale = d.lyrics_seq
+
+            # Poll 2: mpv resolves metadata.artist="grentperez" -> upgrades lyrics lookup
+            state["metadata"] = {"artist": "grentperez"}
+            state["duration"] = 180.0
+            d.poll_mpv()
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[1][2], "grentperez")
+            seq_fresh = d.lyrics_seq
+
+            # Stale completion from seq 1 must be ignored; seq 2 accepted
+            d.ui_events.put(("lyrics_done", (state["path"], seq_stale, "Stuck on You - On June [LRCLIB]", [(1.0, "wrong")])))
+            d.drain_ui_events()
+            self.assertTrue(d.lyrics_loading)
+            d.ui_events.put(("lyrics_done", (state["path"], seq_fresh, "Stuck On You - grentperez [LRCLIB]", [(1.0, "right")])))
+            d.drain_ui_events()
+            self.assertFalse(d.lyrics_loading)
+            self.assertEqual(d.lyrics_header, "Stuck On You - grentperez [LRCLIB]")
+
+            # History fallback populates missing header album and marks current queue row with '>'
+            (data_dir / "history.tsv").write_text(
+                "sOTSMrC4zio\tфруктовый 2.0\tyoungblazer • fruktoviy • 2:02\n"
+                "bcd7r2ueJcQ\tStuck On You\tgrentperez • When We Were Younger • 02:40\n",
+                encoding="utf-8",
+            )
+            d.refresh_local_files_meta()
+            d.load_tab_items()
+            d.selected_idx = 0
+            d.render()
+            screen_txt = "\n".join(scr.row_text(r) for r in range(36))
+            self.assertIn("grentperez - When We Were Younger", screen_txt)
+            self.assertIn("> 2.", screen_txt)
+
 
 if __name__ == "__main__":
     unittest.main()
