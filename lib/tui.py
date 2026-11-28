@@ -2050,8 +2050,30 @@ class SovereignDashboard:
 
         summary = format_queue_summary(pl, dur)
         has_toast = bool(self.toast_msg and time.monotonic() < self.toast_until)
-        right_title = f"{self.toast_msg} | {summary}" if has_toast else summary
         b_attr = curses.color_pair(PAIR_BOX)
+
+        def draw_footer_right(fy_row: int, x_min: int, x_max: int) -> None:
+            avail = x_max - x_min
+            if avail <= 4:
+                return
+            sum_txt = f" {truncate_width(summary, max(2, avail - 2))} "
+            sum_w = display_width(sum_txt)
+            sx = max(x_min, x_max - sum_w)
+            if has_toast:
+                avail_toast = sx - x_min - 1
+                if avail_toast >= 6:
+                    self.safe_addstr(fy_row, sx, sum_txt, curses.color_pair(PAIR_CYAN))
+                    self.add_hitbox(sx, fy_row, sx + sum_w, fy_row + 1, "tab", "queue")
+                    toast_txt = f" {truncate_width(self.toast_msg, avail_toast - 2)} "
+                    tx = max(x_min, sx - 1 - display_width(toast_txt))
+                    self.safe_addstr(fy_row, tx, toast_txt, curses.color_pair(PAIR_TOAST) | curses.A_BOLD)
+                else:
+                    toast_txt = f" {truncate_width(self.toast_msg, max(2, avail - 2))} "
+                    tx = max(x_min, x_max - display_width(toast_txt))
+                    self.safe_addstr(fy_row, tx, toast_txt, curses.color_pair(PAIR_TOAST) | curses.A_BOLD)
+            else:
+                self.safe_addstr(fy_row, sx, sum_txt, curses.color_pair(PAIR_CYAN))
+                self.add_hitbox(sx, fy_row, sx + sum_w, fy_row + 1, "tab", "queue")
 
         def draw_timeline(ty: int, tx: int, tw: int) -> None:
             pos_s = format_mmss(pos)
@@ -2083,10 +2105,7 @@ class SovereignDashboard:
             bot_line = "╰" + "─" * max(0, mw - 1) + "┴" + "─" * max(0, pw - 2) + "╯"
             self.safe_addstr(fy, 0, top_line, b_attr)
             if pw > 6:
-                title_txt = f" {truncate_width(right_title, max(4, pw - 4))} "
-                tx = max(mw + 1, fw - 1 - display_width(title_txt))
-                t_attr = curses.color_pair(PAIR_TOAST if has_toast else PAIR_CYAN) | (curses.A_BOLD if has_toast else 0)
-                self.safe_addstr(fy, tx, title_txt, t_attr)
+                draw_footer_right(fy, mw + 1, fw - 1)
 
             self.safe_addstr(fy + 1, 0, "│", b_attr)
             self.safe_addstr(fy + 1, mw, "│", b_attr)
@@ -2104,10 +2123,7 @@ class SovereignDashboard:
         else:
             self.safe_addstr(fy, 0, "─" * fw, b_attr)
             if fw > 10:
-                title_txt = f" {truncate_width(right_title, max(4, fw - 4))} "
-                tx = max(0, fw - display_width(title_txt) - 1)
-                t_attr = curses.color_pair(PAIR_TOAST if has_toast else PAIR_CYAN) | (curses.A_BOLD if has_toast else 0)
-                self.safe_addstr(fy, tx, title_txt, t_attr)
+                draw_footer_right(fy, 0, fw - 1)
             m_pill = f" {mode_lbl} "
             self.safe_addstr(fy + 1, 0, m_pill, curses.color_pair(mode_pair) | curses.A_BOLD)
             self.add_hitbox(0, fy + 1, len(m_pill), fy + 2, mode_act[0], mode_act[1])
@@ -2376,6 +2392,7 @@ class SovereignDashboard:
             if paths:
                 self.run_cli_batch_async([["add", p] for p in paths], toast=f"Queued {len(paths)} tracks", reload_after=True)
         elif kind in ("playlist", "catalog_container", "catalog_track"):
+            self.set_toast(f"Queueing {title[:22]}...")
             self.run_cli_async(["add", vid], toast=f"Queued: {title[:24]}", reload_after=True)
         else:
             line = f"{vid}\t{title}\t{meta}\t{tag}"
@@ -2423,16 +2440,21 @@ class SovereignDashboard:
             ctx = getattr(self, "drill_ref", "")
             refs = self._collect_track_refs()
             if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")):
+                self.set_toast(f"Loading {self.drill_title[:20]}...")
                 self.run_cli_async(["play", ctx], toast=f"Playing {self.drill_title[:20]}", reload_after=True)
             elif refs:
+                self.set_toast(f"Loading {len(refs)} tracks...")
                 cmds = [["play", refs[0]], *(["add", r] for r in refs[1:])]
                 self.run_cli_batch_async(cmds, toast=f"Playing {len(refs)} tracks", reload_after=True)
         elif action == "add_all":
             ctx = getattr(self, "drill_ref", "")
             refs = self._collect_track_refs()
             if ctx and not ctx.startswith(("lart:", "lalb:", "eart:", "ealb:")):
-                self.run_cli_async(["add", ctx], toast=f"Queued {self.drill_title[:20]}", reload_after=True)
+                self.set_toast(f"Queueing {self.drill_title[:20]}...")
+                done_msg = f"Queued {len(refs)} tracks" if refs else f"Queued {self.drill_title[:20]}"
+                self.run_cli_async(["add", ctx], toast=done_msg, reload_after=True)
             elif refs:
+                self.set_toast(f"Queueing {len(refs)} tracks...")
                 cmds = [["add", r] for r in refs]
                 self.run_cli_batch_async(cmds, toast=f"Queued {len(refs)} tracks", reload_after=True)
         elif action == "dl_all":
@@ -2725,6 +2747,9 @@ class SovereignDashboard:
             self.search_query, act = apply_search_key(self.search_query, wch)
             if act == "blur":
                 self.search_focus = False
+            elif act == "cycle_scope":
+                nxt = self.cycle_search_type()
+                self.set_toast(f"Scope: {nxt}")
             elif act == "submit":
                 self.trigger_search(self.search_query)
             return True
@@ -2987,6 +3012,17 @@ class SovereignDashboard:
                     continue
                 if bstate & curses.BUTTON5_PRESSED:
                     self.handle_mouse_wheel(mx, my, 3)
+                    continue
+                if (bstate & (curses.BUTTON1_RELEASED | curses.BUTTON3_RELEASED)) and not (
+                    bstate
+                    & (
+                        curses.BUTTON1_CLICKED
+                        | curses.BUTTON1_PRESSED
+                        | curses.BUTTON1_DOUBLE_CLICKED
+                        | curses.BUTTON3_CLICKED
+                        | curses.BUTTON3_PRESSED
+                    )
+                ):
                     continue
                 for hb in reversed(self.hitboxes):
                     if hb.contains(mx, my):
