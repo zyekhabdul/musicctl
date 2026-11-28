@@ -3667,21 +3667,6 @@ class TestClickableLinksAndHints(unittest.TestCase):
                 return hb
         return None
 
-    def test_widget_helpers_alb_group_tab_scope_and_hints(self):
-        self.assertIn("[ALB]", tui.GROUP_LIST_TAGS)
-        self.assertEqual(tui.apply_search_key("when we", "\t"), ("when we", "cycle_scope"))
-        self.assertEqual(tui.apply_search_key("when we", 9), ("when we", "cycle_scope"))
-        self.assertEqual(tui.hint_action_for_key("Enter", "Play"), ("play_sel", None))
-        self.assertEqual(tui.hint_action_for_key("a", "+Queue"), ("add_sel", None))
-        self.assertEqual(tui.hint_action_for_key("a", "+Queue All"), ("add_sel", None))
-        self.assertEqual(tui.hint_action_for_key("d", "DL"), ("dl_sel", None))
-        self.assertEqual(tui.hint_action_for_key("d", "Download"), ("dl_sel", None))
-        self.assertEqual(tui.hint_action_for_key("I", "Info"), ("rtab", "info"))
-        self.assertEqual(tui.hint_action_for_key("/", "Search"), ("focus_search", None))
-        self.assertEqual(tui.hint_action_for_key("?", "Help"), ("help", None))
-        self.assertEqual(tui.hint_action_for_key("Tab", "Scope"), ("cycle_search_type", None))
-        self.assertIsNone(tui.hint_action_for_key("J/K", "Move"))
-
     def test_catalog_extracts_artist_and_album_ids(self):
         ytm_search_raw = {
             "contents": {
@@ -3794,6 +3779,21 @@ class TestClickableLinksAndHints(unittest.TestCase):
         )
         self.assertEqual(it_songs[0]["artist_id"], "222")
         self.assertEqual(it_songs[0]["album_id"], "333")
+
+    def test_widget_helpers_alb_group_tab_scope_and_hints(self):
+        self.assertIn("[ALB]", tui.GROUP_LIST_TAGS)
+        self.assertEqual(tui.apply_search_key("when we", "\t"), ("when we", "cycle_scope"))
+        self.assertEqual(tui.apply_search_key("when we", 9), ("when we", "cycle_scope"))
+        self.assertEqual(tui.hint_action_for_key("Enter", "Play"), ("play_sel", None))
+        self.assertEqual(tui.hint_action_for_key("a", "+Queue"), ("add_sel", None))
+        self.assertEqual(tui.hint_action_for_key("a", "+Queue All"), ("add_sel", None))
+        self.assertEqual(tui.hint_action_for_key("d", "DL"), ("dl_sel", None))
+        self.assertEqual(tui.hint_action_for_key("d", "Download"), ("dl_sel", None))
+        self.assertEqual(tui.hint_action_for_key("I", "Info"), ("rtab", "info"))
+        self.assertEqual(tui.hint_action_for_key("/", "Search"), ("focus_search", None))
+        self.assertEqual(tui.hint_action_for_key("?", "Help"), ("help", None))
+        self.assertEqual(tui.hint_action_for_key("Tab", "Scope"), ("cycle_search_type", None))
+        self.assertIsNone(tui.hint_action_for_key("J/K", "Move"))
 
     def test_clickable_artist_album_cells_bottom_hints_and_tab_scope(self):
         with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
@@ -3975,6 +3975,110 @@ class TestClickableLinksAndHints(unittest.TestCase):
         }
         art = catalog.parse_ytm_browse(artist_with_recs, "UC3CyxyxdZLGrcpHUuaZolVw")
         self.assertEqual([x["id"] for x in art["items"]], ["MPREb_OQe9e9LtuOu"])
+
+    def test_queue_and_upnext_enrich_raw_url_from_history(self):
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "history.tsv").write_text(
+                "eEZbYyiOfiU\tWhen We Were Younger\tgrentperez • When We Were Younger • 03:55\n"
+                "oWUfHMKPcUU\tWhen We Were Younger (Intro)\tgrentperez • When We Were Younger • 00:42\n",
+                encoding="utf-8",
+            )
+            scr = self._make_scr(36, 120)
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=data_dir,
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.mpv_state = {
+                "idle-active": False,
+                "metadata": {"artist": "grentperez", "album": ""},
+                "duration": 241.0,
+                "playlist": [
+                    {
+                        "filename": "https://www.youtube.com/watch?v=eEZbYyiOfiU",
+                        "title": "grentperez - When We Were Younger (Official Music Video)",
+                        "current": True,
+                    },
+                    {
+                        "filename": "https://www.youtube.com/watch?v=oWUfHMKPcUU",
+                        "current": False,
+                    },
+                ],
+            }
+            d.active_tab = "queue"
+            d.load_tab_items()
+            self.assertEqual(
+                d.tracks,
+                [
+                    ("eEZbYyiOfiU", "When We Were Younger", "grentperez • When We Were Younger • 04:01", "[Q]"),
+                    ("oWUfHMKPcUU", "When We Were Younger (Intro)", "grentperez • When We Were Younger • 00:42", "[Q]"),
+                ],
+            )
+            sig1 = d._queue_state_sig()
+            (data_dir / "history.tsv").write_text(
+                "eEZbYyiOfiU\tWhen We Were Younger\tgrentperez • When We Were Younger • 03:55\n"
+                "oWUfHMKPcUU\tWhen We Were Younger (Intro)\tgrentperez • When We Were Younger • 00:42\n"
+                "bcd7r2ueJcQ\tStuck On You\tgrentperez • When We Were Younger • 02:40\n",
+                encoding="utf-8",
+            )
+            self.assertNotEqual(d._queue_state_sig(), sig1)
+
+            # Up Next drawer also renders resolved title instead of raw URL
+            d.active_tab = "search"
+            d.layout_mode = "split"
+            d.right_tab = "upnext"
+            d.render()
+            screen_txt = "\n".join(scr.row_text(r) for r in range(36))
+            self.assertIn("When We Were Younger (Intro)", screen_txt)
+            self.assertNotIn("https://www.youtube.com/watch?v=oWUfHMKPcUU", screen_txt)
+
+    def test_add_all_loading_toast_and_footer_toast_split(self):
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            scr = self._make_scr(36, 120)
+            d = tui.SovereignDashboard(
+                stdscr=scr,
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.active_tab = "search"
+            d.drill_ref = "ytm:album:MPREb_OQe9e9LtuOu"
+            d.drill_title = "When We Were Younger"
+            d.nav_stack = [{"tracks": []}]
+            d.tracks = [(f"vid{i:08d}", f"Track {i}", "grentperez • When We Were Younger", "[YTM]") for i in range(7)]
+            d.mpv_state = {
+                "idle-active": False,
+                "duration": 241.0,
+                "playlist": [{"filename": "a", "current": True}, {"filename": "b", "current": False}],
+            }
+
+            calls: list[tuple[list[str], str, bool]] = []
+            d.run_cli_async = lambda args, toast="", reload_after=False, **_kw: calls.append((args, toast, reload_after))
+
+            d.handle_action("add_all", None)
+            self.assertTrue(d.toast_msg.startswith("Queueing "))
+            self.assertEqual(calls, [(["add", "ytm:album:MPREb_OQe9e9LtuOu"], "Queued 7 tracks", True)])
+
+            d.render()
+            fy = d.last_layout["footer"][0]
+            footer_top = scr.row_text(fy)
+            self.assertIn("Queueing ", footer_top)
+            self.assertIn("2 songs", footer_top)
+            self.assertNotIn(" | ", footer_top)
+            q_hb = next(h for h in d.hitboxes if h.y0 == fy and h.action == "tab" and h.payload == "queue")
+            self.assertEqual(self._resolve_hb(d.hitboxes, (q_hb.x0 + q_hb.x1) // 2, q_hb.y0).payload, "queue")
+
 
 if __name__ == "__main__":
     unittest.main()
