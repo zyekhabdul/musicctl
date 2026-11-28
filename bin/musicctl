@@ -2669,12 +2669,33 @@ cmd_queue() {
     printf '%s[IDLE]%s Queue is empty\n' "$UI_DIM" "$UI_RST"
     return 0
   fi
-  jq -r 'to_entries[] | "\(.key + 1)\t\((.value.current // false))\t\(.value.title // .value.filename // "Unknown")\t\(.value.filename // "")"' <<<"$pl_json" \
-    | while IFS=$'\t' read -r idx is_cur title fname; do
+  jq -r 'to_entries[] | [(.key + 1 | tostring), ((.value.current // false) | tostring), (.value.title // ""), (.value.filename // "")] | join("\u001f")' <<<"$pl_json" \
+    | while IFS=$'\x1f' read -r idx is_cur title fname; do
+        local disp="$title"
+        if [[ -z "$disp" || "$disp" == "$fname" || "$disp" =~ ^https?:// ]]; then
+          local vid row r_title r_meta f
+          vid="$(extract_video_id "$fname")"
+          row=""
+          for f in "$HIST_FILE" "$FAV_FILE"; do
+            [[ -f "$f" ]] || continue
+            row="$(awk -F'\t' -v id="$vid" -v fn="$fname" '($1 == id || $1 == fn) && NF >= 2 && $2 != $1 {print; exit}' "$f" 2>/dev/null || true)"
+            [[ -n "$row" ]] && break
+          done
+          if [[ -n "$row" ]]; then
+            IFS=$'\t' read -r _ r_title r_meta _ <<<"$row"
+            if [[ -n "$r_title" ]]; then
+              disp="$r_title"
+              if [[ -n "$r_meta" && "$r_meta" != "Video ID" && "$r_meta" != "Direct URL" ]]; then
+                disp="$r_title ($r_meta)"
+              fi
+            fi
+          fi
+        fi
+        [[ -n "$disp" ]] || disp="${fname:-Unknown}"
         if [[ "$is_cur" == "true" ]]; then
-          printf '%s>%s %2s. %s%s%s\n' "$UI_GREEN" "$UI_RST" "$idx" "$UI_BOLD" "$title" "$UI_RST"
+          printf '%s>%s %2s. %s%s%s\n' "$UI_GREEN" "$UI_RST" "$idx" "$UI_BOLD" "$disp" "$UI_RST"
         else
-          printf '  %2s. %s\n' "$idx" "$title"
+          printf '  %2s. %s\n' "$idx" "$disp"
         fi
       done
 }
