@@ -37,6 +37,7 @@ from common import (
     format_speed,
     normalize_track_title,
     parse_fallback_lyrics_json,
+    parse_meta_fields,
     parse_synced_lyrics_lines,
     pick_best_lyrics_candidate,
 )
@@ -306,6 +307,10 @@ class SovereignDashboard:
         self.drill_kind = ""
         self._local_groups: dict[str, list[dict[str, Any]]] = {}
         self._entity_groups: dict[str, list[tuple[str, str, str, str]]] = {}
+        self._row_links: dict[str, dict[str, tuple[str, str]]] = {}
+        self._cached_favs: list[tuple[str, str, str, str]] = []
+        self._cached_hist: list[tuple[str, str, str, str]] = []
+        self._track_meta_index: dict[str, tuple[str, str]] = {}
 
         self.tracks: list[tuple[str, str, str, str]] = []
         self.search_results: list[tuple[str, str, str, str]] = []
@@ -439,18 +444,48 @@ class SovereignDashboard:
         except OSError:
             return None
 
+    def _rebuild_track_meta_index(self) -> None:
+        idx: dict[str, tuple[str, str]] = {}
+        for rid, rtitle, rmeta, _tag in [*getattr(self, "_cached_hist", []), *getattr(self, "_cached_favs", [])]:
+            key = (rid or "").strip()
+            ttl = (rtitle or "").strip()
+            if not key or not ttl or is_placeholder_title(ttl, key):
+                continue
+            meta_s = (rmeta or "").strip()
+            rich = bool(meta_s and meta_s not in ("Video ID", "Direct URL"))
+            for k in {key, extract_video_id(key)}:
+                if not k:
+                    continue
+                prev = idx.get(k)
+                if prev is None or (rich and not (prev[1] and prev[1] not in ("Video ID", "Direct URL"))):
+                    idx[k] = (ttl, meta_s)
+        self._track_meta_index = idx
+
     def refresh_local_files_meta(self) -> None:
         sigs = getattr(self, "_file_sigs", None)
         if sigs is None:
             sigs = {}
             self._file_sigs = sigs
 
+        meta_dirty = False
         fav_path = self.data_dir / "favorites.tsv"
         fav_sig = self._file_sig(fav_path)
         if fav_sig != sigs.get("fav", ...):
             sigs["fav"] = fav_sig
-            favs = self.read_tsv(fav_path, "[FAV]")
+            favs = self.read_tsv(fav_path, "[FAV]") if fav_sig is not None else []
+            self._cached_favs = favs
             self.fav_ids = {x[0] for x in favs}
+            meta_dirty = True
+
+        hist_path = self.data_dir / "history.tsv"
+        hist_sig = self._file_sig(hist_path)
+        if hist_sig != sigs.get("hist", ...):
+            sigs["hist"] = hist_sig
+            self._cached_hist = self.read_tsv(hist_path, "[HIS]") if hist_sig is not None else []
+            meta_dirty = True
+
+        if meta_dirty:
+            self._rebuild_track_meta_index()
 
         audio_state = self.data_dir / "audio.state"
         audio_sig = self._file_sig(audio_state)
@@ -645,7 +680,59 @@ class SovereignDashboard:
         )
         mf = extract_metadata_fields(self.mpv_state.get("metadata"))
         dur = int(round(float(self.mpv_state.get("duration") or 0.0)))
-        return (pl_sig, mf.get("artist") or "", mf.get("album") or "", dur)
+        hist_sig = self._file_sig(self.data_dir / "history.tsv")
+        fav_sig = self._file_sig(self.data_dir / "favorites.tsv")
+        return (pl_sig, mf.get("artist") or "", mf.get("album") or "", dur, hist_sig, fav_sig)
+
+    def _resolve_queue_entry(
+        self,
+        entry: dict[str, Any],
+        idx: int,
+        cur_mf: dict[str, Any] | None = None,
+        cur_dur: float = 0.0,
+    ) -> tuple[str, str, str]:
+        fname = str(entry.get("filename") or "")
+        raw_title = str(entry.get("title") or "").strip()
+        vid = extract_video_id(fname)
+        is_cur = bool(entry.get("current"))
+        meta_idx = getattr(self, "_track_meta_index", {})
+        known = meta_idx.get(vid) or meta_idx.get(fname)
+        k_title, k_meta = known if known else ("", "")
+        k_fields = (
+            parse_meta_fields(k_meta)
+            if k_meta
+            else {"artist": "", "album": "", "duration": 0, "duration_str": ""}
+        )
+
+        if is_cur and cur_mf:
+            artist = cur_mf.get("artist") or k_fields.get("artist") or ""
+            album = cur_mf.get("album") or k_fields.get("album") or ""
+            dur_s = format_mmss(cur_dur) if cur_dur > 0 else (k_fields.get("duration_str") or "")
+        else:
+            artist = k_fields.get("artist") or ""
+            album = k_fields.get("album") or ""
+            dur_s = k_fields.get("duration_str") or ""
+            if not dur_s:
+                try:
+                    dval = float(entry.get("duration") or 0.0)
+                except (TypeError, ValueError):
+                    dval = 0.0
+                if dval > 0:
+                    dur_s = format_mmss(dval)
+
+        if raw_title and not is_placeholder_title(raw_title, vid):
+            title = format_header_title(raw_title, artist) or raw_title
+        elif k_title and not is_placeholder_title(k_title, vid):
+            title = format_header_title(k_title, artist) or k_title
+        elif fname.startswith("/"):
+            title = Path(fname).stem
+        else:
+            title = raw_title or fname or "Unknown"
+
+        parts = [p for p in (artist, album, dur_s) if p]
+        if not parts:
+            parts = [f"#{idx + 1}", "Active" if is_cur else "Queued"]
+        return (vid, title, " • ".join(parts))
 
     def load_tab_items(self) -> None:
         self.refresh_local_files_meta()
@@ -670,22 +757,10 @@ class SovereignDashboard:
             cur_mf = extract_metadata_fields(self.mpv_state.get("metadata"))
             cur_dur = float(self.mpv_state.get("duration") or 0.0)
             for idx, entry in enumerate(pl):
-                fname = entry.get("filename") or ""
-                title = entry.get("title") or fname or "Unknown"
-                vid = extract_video_id(fname)
-                is_cur = bool(entry.get("current"))
-                parts: list[str] = []
-                if is_cur:
-                    if cur_mf.get("artist"):
-                        parts.append(cur_mf["artist"])
-                    if cur_mf.get("album"):
-                        parts.append(cur_mf["album"])
-                    if cur_dur > 0:
-                        parts.append(format_mmss(cur_dur))
-                if not parts:
-                    parts.append(f"#{idx + 1}")
-                    parts.append("Active" if is_cur else "Queued")
-                qitems.append((vid, title, " • ".join(parts), "[Q]"))
+                if not isinstance(entry, dict):
+                    continue
+                vid, title, meta_s = self._resolve_queue_entry(entry, idx, cur_mf, cur_dur)
+                qitems.append((vid, title, meta_s, "[Q]"))
             self.tracks = qitems
             self._last_queue_sig = self._queue_state_sig()
         elif self.active_tab in ("artists", "albums"):
@@ -1742,7 +1817,7 @@ class SovereignDashboard:
                     entry = pl[qi]
                     is_c = bool(entry.get("current"))
                     is_dsel = focused and qi == dsel
-                    qtitle = entry.get("title") or entry.get("filename") or "Unknown"
+                    _qvid, qtitle, _qmeta = self._resolve_queue_entry(entry, qi)
                     mark = "▸" if (is_dsel or is_c) else " "
                     line = truncate_width(f"{mark} {qi + 1:2d}. {qtitle}", b_inner_w)
                     if is_dsel:
