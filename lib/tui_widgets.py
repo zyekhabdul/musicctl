@@ -402,6 +402,8 @@ def apply_search_key(query: str, key: int | str) -> tuple[str, str]:
     """Apply a curses get_wch() key to the search query buffer -> (new_query, action)."""
     if key in (27, "\x1b"):
         return query, "blur"
+    if key in (9, "\t"):
+        return query, "cycle_scope"
     if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
         return query, "submit"
     if key in (21, 11, "\x15", "\x0b"):
@@ -675,7 +677,37 @@ def aggregate_albums(
 
 CATALOG_CONTAINER_RE = re.compile(r"^(?:ytm|deezer|itunes):(?:album|artist|playlist):")
 CATALOG_TRACK_RE = re.compile(r"^(?:ytm|deezer|itunes):(?:song|track):")
-GROUP_LIST_TAGS = frozenset({"[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]", "[PL]", "[ART]"})
+GROUP_LIST_TAGS = frozenset({"[L-ART]", "[L-ALB]", "[E-ART]", "[E-ALB]", "[PL]", "[ART]", "[ALB]"})
+
+
+_HINT_ACTIONS: dict[tuple[str, str], tuple[str, Any]] = {
+    ("Enter", "Search"): ("do_search", None),
+    ("Esc", "Done"): ("blur_search", None),
+    ("Ctrl-U", "Clear"): ("clear_search", None),
+    ("Tab", "Scope"): ("cycle_search_type", None),
+    ("X", "Cancel All"): ("dl_cancel", None),
+    ("Esc", "Close"): ("close_modal", None),
+    ("Space", "Pause"): ("toggle", None),
+    ("Enter", "Play"): ("play_sel", None),
+    ("Enter", "Open"): ("play_sel", None),
+    ("Enter", "Jump"): ("play_sel", None),
+    ("a", "+Queue"): ("add_sel", None),
+    ("a", "+Queue All"): ("add_sel", None),
+    ("f", "Fav"): ("fav_sel", None),
+    ("d", "DL"): ("dl_sel", None),
+    ("d", "Download"): ("dl_sel", None),
+    ("r", "Radio"): ("radio_sel", None),
+    ("I", "Info"): ("rtab", "info"),
+    ("D", "DL Modal"): ("rtab", "downloads"),
+    ("/", "Search"): ("focus_search", None),
+    ("Bksp", "Back"): ("nav_back", None),
+    ("?", "Help"): ("help", None),
+}
+
+
+def hint_action_for_key(k_txt: str, lbl: str) -> tuple[str, Any] | None:
+    """Map a bottom context-hint (key, label) pair to a dashboard action tuple."""
+    return _HINT_ACTIONS.get((k_txt, lbl))
 
 
 def classify_row(vid: str, tag: str = "") -> str:
