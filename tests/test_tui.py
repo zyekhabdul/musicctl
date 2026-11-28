@@ -3682,5 +3682,118 @@ class TestClickableLinksAndHints(unittest.TestCase):
         self.assertEqual(tui.hint_action_for_key("Tab", "Scope"), ("cycle_search_type", None))
         self.assertIsNone(tui.hint_action_for_key("J/K", "Move"))
 
+    def test_catalog_extracts_artist_and_album_ids(self):
+        ytm_search_raw = {
+            "contents": {
+                "musicShelfRenderer": {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "playlistItemData": {"videoId": "eEZbYyiOfiU"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "When We Were Younger"}]}}},
+                                    {
+                                        "musicResponsiveListItemFlexColumnRenderer": {
+                                            "text": {
+                                                "runs": [
+                                                    {
+                                                        "text": "grentperez",
+                                                        "navigationEndpoint": {
+                                                            "browseEndpoint": {
+                                                                "browseId": "UC3CyxyxdZLGrcpHUuaZolVw",
+                                                                "browseEndpointContextSupportedConfigs": {
+                                                                    "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}
+                                                                },
+                                                            }
+                                                        },
+                                                    },
+                                                    {"text": " • "},
+                                                    {
+                                                        "text": "When We Were Younger",
+                                                        "navigationEndpoint": {
+                                                            "browseEndpoint": {
+                                                                "browseId": "MPREb_OQe9e9LtuOu",
+                                                                "browseEndpointContextSupportedConfigs": {
+                                                                    "browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}
+                                                                },
+                                                            }
+                                                        },
+                                                    },
+                                                    {"text": " • "},
+                                                    {"text": "3:55"},
+                                                ]
+                                            }
+                                        }
+                                    },
+                                ],
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        songs = catalog.parse_ytm_search(ytm_search_raw, "songs")
+        self.assertEqual(len(songs), 1)
+        self.assertEqual(songs[0]["artist_id"], "UC3CyxyxdZLGrcpHUuaZolVw")
+        self.assertEqual(songs[0]["album_id"], "MPREb_OQe9e9LtuOu")
+
+        ytm_album_raw = {
+            "header": {
+                "musicDetailHeaderRenderer": {
+                    "title": {"runs": [{"text": "When We Were Younger"}]},
+                    "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "grentperez"}, {"text": " • "}, {"text": "2023"}]},
+                }
+            },
+            "contents": {
+                "musicShelfRenderer": {
+                    "contents": [
+                        {
+                            "musicResponsiveListItemRenderer": {
+                                "index": {"runs": [{"text": "1"}]},
+                                "playlistItemData": {"videoId": "oWUfHMKPcUU"},
+                                "flexColumns": [
+                                    {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "When We Were Younger (Intro)"}]}}},
+                                ],
+                            }
+                        }
+                    ]
+                }
+            },
+        }
+        alb = catalog.parse_ytm_browse(ytm_album_raw, "MPREb_OQe9e9LtuOu")
+        self.assertEqual(alb["items"][0]["album_id"], "MPREb_OQe9e9LtuOu")
+
+        dz_track = catalog.parse_deezer_track(
+            {
+                "id": 2348693025,
+                "title": "When We Were Younger",
+                "duration": 234,
+                "artist": {"id": 95844392, "name": "grentperez"},
+                "album": {"id": 459233165, "title": "When We Were Younger"},
+            }
+        )
+        self.assertEqual(dz_track["artist_id"], "95844392")
+        self.assertEqual(dz_track["album_id"], "459233165")
+
+        it_songs = catalog.parse_itunes_search(
+            {
+                "results": [
+                    {
+                        "wrapperType": "track",
+                        "trackId": 111,
+                        "trackName": "When We Were Younger",
+                        "artistId": 222,
+                        "artistName": "grentperez",
+                        "collectionId": 333,
+                        "collectionName": "When We Were Younger",
+                        "trackTimeMillis": 235000,
+                    }
+                ]
+            },
+            "songs",
+        )
+        self.assertEqual(it_songs[0]["artist_id"], "222")
+        self.assertEqual(it_songs[0]["album_id"], "333")
+
 if __name__ == "__main__":
     unittest.main()
