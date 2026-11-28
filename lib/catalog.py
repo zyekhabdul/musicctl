@@ -493,6 +493,38 @@ def _extract_ytm_continuation(data: dict[str, Any]) -> str:
     return ""
 
 
+_SKIP_CAROUSEL_TITLES = frozenset(
+    {
+        "releases for you",
+        "you might also like",
+        "fans might also like",
+        "other versions",
+        "similar artists",
+        "related",
+    }
+)
+
+
+def _iter_ytm_two_row_cards(obj: Any) -> list[dict[str, Any]]:
+    """Collect musicTwoRowItemRenderer cards while skipping recommendation carousels."""
+    found: list[dict[str, Any]] = []
+    if isinstance(obj, dict):
+        if "musicTwoRowItemRenderer" in obj and isinstance(obj["musicTwoRowItemRenderer"], dict):
+            found.append(obj["musicTwoRowItemRenderer"])
+        for k, v in obj.items():
+            if k == "musicCarouselShelfRenderer" and isinstance(v, dict):
+                hdr_title = _runs_text(
+                    v.get("header", {}).get("musicCarouselShelfBasicHeaderRenderer", {}).get("title")
+                ).lower()
+                if hdr_title in _SKIP_CAROUSEL_TITLES:
+                    continue
+            found.extend(_iter_ytm_two_row_cards(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            found.extend(_iter_ytm_two_row_cards(item))
+    return found
+
+
 def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
     """Parse InnerTube browse response into header entity, child items, and continuation."""
     if not isinstance(data, dict):
@@ -599,43 +631,44 @@ def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
             )
         )
 
-    for card in _walk_key(data, "musicTwoRowItemRenderer"):
-        if not isinstance(card, dict):
-            continue
-        nav = card.get("navigationEndpoint") or {}
-        b_id = (nav.get("browseEndpoint") or {}).get("browseId")
-        vid = (nav.get("watchEndpoint") or {}).get("videoId")
-        title = _runs_text(card.get("title"))
-        if not title:
-            continue
-        if b_id:
-            eid = str(b_id)
-            etype = _ytm_browse_type_from_id(eid)
-        elif vid:
-            eid = str(vid)
-            etype = "song"
-        else:
-            continue
-        if (etype, eid) in seen:
-            continue
-        seen.add((etype, eid))
+    if header["type"] not in ("album", "playlist"):
+        for card in _iter_ytm_two_row_cards(data):
+            if not isinstance(card, dict):
+                continue
+            nav = card.get("navigationEndpoint") or {}
+            b_id = (nav.get("browseEndpoint") or {}).get("browseId")
+            vid = (nav.get("watchEndpoint") or {}).get("videoId")
+            title = _runs_text(card.get("title"))
+            if not title:
+                continue
+            if b_id:
+                eid = str(b_id)
+                etype = _ytm_browse_type_from_id(eid)
+            elif vid:
+                eid = str(vid)
+                etype = "song"
+            else:
+                continue
+            if (etype, eid) in seen:
+                continue
+            seen.add((etype, eid))
 
-        tokens, year, dur = _extract_ytm_meta_tokens([_runs_text(card.get("subtitle"))])
-        artist = tokens[0] if tokens else hdr_artist
-        cover = _best_thumbnail_url(card.get("thumbnailRenderer")) or hdr_cover
-        items.append(
-            make_entity(
-                source="ytm",
-                id=eid,
-                type=etype,
-                title=title,
-                artist=artist,
-                album=title if etype == "album" else "",
-                year=year,
-                duration=dur,
-                cover_url=cover,
+            tokens, year, dur = _extract_ytm_meta_tokens([_runs_text(card.get("subtitle"))])
+            artist = tokens[0] if tokens else hdr_artist
+            cover = _best_thumbnail_url(card.get("thumbnailRenderer")) or hdr_cover
+            items.append(
+                make_entity(
+                    source="ytm",
+                    id=eid,
+                    type=etype,
+                    title=title,
+                    artist=artist,
+                    album=title if etype == "album" else "",
+                    year=year,
+                    duration=dur,
+                    cover_url=cover,
+                )
             )
-        )
 
     return {
         "entity": header,
