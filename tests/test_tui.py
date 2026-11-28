@@ -3795,5 +3795,92 @@ class TestClickableLinksAndHints(unittest.TestCase):
         self.assertEqual(it_songs[0]["artist_id"], "222")
         self.assertEqual(it_songs[0]["album_id"], "333")
 
+    def test_clickable_artist_album_cells_bottom_hints_and_tab_scope(self):
+        with tempfile.TemporaryDirectory() as td, unittest.mock.patch.object(tui.curses, "color_pair", return_value=0):
+            root = Path(td)
+            d = tui.SovereignDashboard(
+                stdscr=self._make_scr(40, 120),
+                data_dir=root / "data",
+                cache_dir=root / "cache",
+                download_dir=root / "dl",
+                art_enabled=False,
+                mpv=unittest.mock.Mock(),
+                dl_manager=unittest.mock.Mock(),
+            )
+            d.data_dir.mkdir(parents=True, exist_ok=True)
+            d.active_tab = "search"
+            row = d._catalog_entity_to_row(
+                {
+                    "source": "deezer",
+                    "id": "2348693025",
+                    "type": "song",
+                    "title": "When We Were Younger",
+                    "artist": "grentperez",
+                    "album": "When We Were Younger",
+                    "artist_id": "95844392",
+                    "album_id": "459233165",
+                    "duration": 234,
+                }
+            )
+            d.search_results = [row]
+            d.tracks = [row]
+            d.selected_idx = 0
+            d.render()
+
+            link_hbs = [hb for hb in d.hitboxes if hb.action == "browse_link"]
+            self.assertEqual(len(link_hbs), 2)
+            art_hb = next(hb for hb in link_hbs if hb.payload[1] == "artist")
+            alb_hb = next(hb for hb in link_hbs if hb.payload[1] == "album")
+            self.assertEqual(art_hb.payload[2], "deezer:artist:95844392")
+            self.assertEqual(alb_hb.payload[2], "deezer:album:459233165")
+
+            # Reverse hitbox resolution: Artist cell -> browse_link, Album cell -> browse_link, Title center -> row
+            self.assertEqual(self._resolve_hb(d.hitboxes, art_hb.x0 + 1, art_hb.y0).action, "browse_link")
+            self.assertEqual(self._resolve_hb(d.hitboxes, alb_hb.x0 + 1, alb_hb.y0).action, "browse_link")
+            mid_title_x = (art_hb.x1 + alb_hb.x0) // 2
+            self.assertEqual(self._resolve_hb(d.hitboxes, mid_title_x, art_hb.y0).action, "row")
+
+            browsed: list[tuple[str, str]] = []
+            cli_calls: list[list[str]] = []
+            d.trigger_browse = lambda ref, title: browsed.append((ref, title))
+            d.run_cli_async = lambda args, **_kw: cli_calls.append(args)
+
+            d.handle_action(art_hb.action, art_hb.payload, tui.curses.BUTTON1_CLICKED)
+            self.assertEqual(browsed[-1], ("deezer:artist:95844392", "grentperez"))
+
+            d.handle_action(alb_hb.action, alb_hb.payload, tui.curses.BUTTON1_CLICKED)
+            self.assertEqual(browsed[-1], ("deezer:album:459233165", "When We Were Younger"))
+
+            d.handle_action(alb_hb.action, alb_hb.payload, tui.curses.BUTTON3_CLICKED)
+            self.assertEqual(cli_calls[-1], ["add", "deezer:album:459233165"])
+
+            # Bottom hint bar items are clickable via reverse hitbox lookup
+            hy = d.last_layout["hint_bar"][0]
+            hint_hbs = [hb for hb in d.hitboxes if hb.y0 == hy]
+            hint_acts = {hb.action for hb in hint_hbs}
+            for expected in ("play_sel", "add_sel", "fav_sel", "dl_sel", "radio_sel", "rtab", "focus_search", "help"):
+                self.assertIn(expected, hint_acts)
+            for hb in hint_hbs:
+                res = self._resolve_hb(d.hitboxes, (hb.x0 + hb.x1) // 2, hb.y0)
+                self.assertIsNotNone(res)
+                assert res is not None
+                self.assertEqual(res.action, hb.action)
+
+            # Tab during search_focus cycles search_type without dropping focus
+            d.search_focus = True
+            d.search_type = "songs"
+            d.handle_key("\t")
+            self.assertTrue(d.search_focus)
+            self.assertEqual(d.search_type, "albums")
+
+            # [ALB] results render group-list hints (Enter Open, a +Queue All, d Download)
+            d.search_focus = False
+            d.tracks = [("deezer:album:459233165", "When We Were Younger", "Album • grentperez", "[ALB]")]
+            d.render()
+            hint_row_text = d.stdscr.row_text(hy)
+            self.assertIn("Enter Open", hint_row_text)
+            self.assertIn("a +Queue All", hint_row_text)
+            self.assertIn("d Download", hint_row_text)
+
 if __name__ == "__main__":
     unittest.main()
