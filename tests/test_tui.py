@@ -3629,5 +3629,58 @@ class TestUXClarityPolish(unittest.TestCase):
             self.assertNotEqual(d._queue_state_sig(), sig1)
 
 
+class TestClickableLinksAndHints(unittest.TestCase):
+    @staticmethod
+    def _make_scr(h: int = 40, w: int = 120):
+        class RecordingStdscr:
+            def __init__(self, sh: int, sw: int) -> None:
+                self.h, self.w = sh, sw
+                self.writes: list[tuple[int, int, str]] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (self.h, self.w)
+
+            def erase(self) -> None:
+                self.writes.clear()
+
+            def refresh(self) -> None:
+                return None
+
+            def addstr(self, y: int, x: int, text: str, *_args) -> None:
+                self.writes.append((y, x, text))
+
+            def row_text(self, y: int) -> str:
+                buf = [" "] * self.w
+                for wy, wx, txt in self.writes:
+                    if wy == y:
+                        for i, ch in enumerate(txt):
+                            if 0 <= wx + i < self.w:
+                                buf[wx + i] = ch
+                return "".join(buf)
+
+        return RecordingStdscr(h, w)
+
+    @staticmethod
+    def _resolve_hb(hitboxes: list[tui.Hitbox], mx: int, my: int) -> tui.Hitbox | None:
+        for hb in reversed(hitboxes):
+            if hb.contains(mx, my):
+                return hb
+        return None
+
+    def test_widget_helpers_alb_group_tab_scope_and_hints(self):
+        self.assertIn("[ALB]", tui.GROUP_LIST_TAGS)
+        self.assertEqual(tui.apply_search_key("when we", "\t"), ("when we", "cycle_scope"))
+        self.assertEqual(tui.apply_search_key("when we", 9), ("when we", "cycle_scope"))
+        self.assertEqual(tui.hint_action_for_key("Enter", "Play"), ("play_sel", None))
+        self.assertEqual(tui.hint_action_for_key("a", "+Queue"), ("add_sel", None))
+        self.assertEqual(tui.hint_action_for_key("a", "+Queue All"), ("add_sel", None))
+        self.assertEqual(tui.hint_action_for_key("d", "DL"), ("dl_sel", None))
+        self.assertEqual(tui.hint_action_for_key("d", "Download"), ("dl_sel", None))
+        self.assertEqual(tui.hint_action_for_key("I", "Info"), ("rtab", "info"))
+        self.assertEqual(tui.hint_action_for_key("/", "Search"), ("focus_search", None))
+        self.assertEqual(tui.hint_action_for_key("?", "Help"), ("help", None))
+        self.assertEqual(tui.hint_action_for_key("Tab", "Scope"), ("cycle_search_type", None))
+        self.assertIsNone(tui.hint_action_for_key("J/K", "Move"))
+
 if __name__ == "__main__":
     unittest.main()
