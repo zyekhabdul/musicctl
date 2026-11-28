@@ -339,6 +339,8 @@ class SovereignDashboard:
         self.max_pairs = 64
 
         self.lyrics_track_key = ""
+        self.lyrics_artist = ""
+        self.lyrics_seq = 0
         self.lyrics_header = ""
         self.lyrics_lines: list[tuple[float | None, str]] = []
         self.lyrics_loading = False
@@ -698,6 +700,21 @@ class SovereignDashboard:
         fav_sig = self._file_sig(self.data_dir / "favorites.tsv")
         return (pl_sig, mf.get("artist") or "", mf.get("album") or "", dur, hist_sig, fav_sig)
 
+    def _lookup_known_track_meta(self, path_or_id: str) -> tuple[str, dict[str, Any]]:
+        key = (path_or_id or "").strip()
+        vid = extract_video_id(key)
+        meta_idx = getattr(self, "_track_meta_index", {})
+        known = meta_idx.get(vid) or meta_idx.get(key)
+        if not known:
+            return ("", {"artist": "", "album": "", "duration": 0, "duration_str": ""})
+        k_title, k_meta = known
+        fields = (
+            parse_meta_fields(k_meta)
+            if k_meta
+            else {"artist": "", "album": "", "duration": 0, "duration_str": ""}
+        )
+        return (k_title, fields)
+
     def _resolve_queue_entry(
         self,
         entry: dict[str, Any],
@@ -709,14 +726,7 @@ class SovereignDashboard:
         raw_title = str(entry.get("title") or "").strip()
         vid = extract_video_id(fname)
         is_cur = bool(entry.get("current"))
-        meta_idx = getattr(self, "_track_meta_index", {})
-        known = meta_idx.get(vid) or meta_idx.get(fname)
-        k_title, k_meta = known if known else ("", "")
-        k_fields = (
-            parse_meta_fields(k_meta)
-            if k_meta
-            else {"artist": "", "album": "", "duration": 0, "duration_str": ""}
-        )
+        k_title, k_fields = self._lookup_known_track_meta(fname)
 
         if is_cur and cur_mf:
             artist = cur_mf.get("artist") or k_fields.get("artist") or ""
@@ -876,9 +886,14 @@ class SovereignDashboard:
                 elif pct > 0:
                     self.set_toast(f"DL {pct}%: {title[:22]}")
             elif kind == "lyrics_done":
-                track_key, header, lines = payload
-                if track_key != self.lyrics_track_key:
-                    continue
+                if len(payload) == 4:
+                    track_key, lseq, header, lines = payload
+                    if track_key != self.lyrics_track_key or lseq != getattr(self, "lyrics_seq", lseq):
+                        continue
+                else:
+                    track_key, header, lines = payload
+                    if track_key != self.lyrics_track_key:
+                        continue
                 self.lyrics_header = header
                 self.lyrics_lines = lines
                 self.lyrics_loading = False
@@ -1081,6 +1096,9 @@ class SovereignDashboard:
         if not clean_title.strip():
             return
         self.lyrics_track_key = track_key
+        self.lyrics_artist = artist.strip()
+        lseq = getattr(self, "lyrics_seq", 0) + 1
+        self.lyrics_seq = lseq
         self.lyrics_loading = True
         lbl = f"{clean_title} - {artist}" if artist else clean_title
         self.lyrics_header = f"Loading lyrics: {lbl[:36]}..."
@@ -1102,7 +1120,7 @@ class SovereignDashboard:
                 header = "Lyrics lookup failed"
                 lines = []
             finally:
-                self.ui_events.put(("lyrics_done", (track_key, header, lines)))
+                self.ui_events.put(("lyrics_done", (track_key, lseq, header, lines)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1187,22 +1205,21 @@ class SovereignDashboard:
             if cur_path and cur_path != self.last_active_path:
                 self.last_active_path = cur_path
                 self.lyrics_track_key = ""
+                self.lyrics_artist = ""
                 self.lyrics_lines = []
                 self.lyrics_loading = False
                 self.lyrics_header = ""
                 self.drawer_scroll = 0
                 self.drawer_sel = 0
+                self.refresh_local_files_meta()
                 art_sz = calc_queue_art_size(getattr(self, "last_layout", {}).get("art"))
                 if art_sz:
                     self.ensure_art_async(vid, art_sz[0], art_sz[1])
                 if self.active_tab == "queue":
                     self.load_tab_items()
 
-            if not idle and cur_path and self.is_lyrics_visible() and self.lyrics_track_key != cur_path and not self.lyrics_loading:
-                if is_placeholder_title(title, vid):
-                    self.lyrics_header = "Waiting for track metadata..."
-                else:
-                    self.fetch_lyrics_async(title, cur_path, artist=artist, duration=dur)
+            if not idle and cur_path and self.is_lyrics_visible():
+                self._maybe_fetch_lyrics_for(cur_path, title, artist, dur)
         else:
             self.mpv_state = {}
 
@@ -1326,13 +1343,17 @@ class SovereignDashboard:
         q_lbl = str(getattr(self, "quality_mode", "cd") or "cd").upper()
 
         mf = extract_metadata_fields(self.mpv_state.get("metadata"))
-        artist = mf.get("artist") or ""
+        cur_path = str(self.mpv_state.get("path") or self.mpv_state.get("filename") or "")
+        k_title, k_fields = self._lookup_known_track_meta(cur_path) if (not idle and cur_path) else ("", {})
+        artist = mf.get("artist") or k_fields.get("artist") or ""
         raw_title = str(self.mpv_state.get("media-title") or self.mpv_state.get("filename") or "")
         if idle or not raw_title:
             title = "No Song"
         else:
             title = format_header_title(raw_title, artist) or raw_title
-        album = format_album_line(mf.get("album", ""), mf.get("year", 0))
+            if is_placeholder_title(title, extract_video_id(cur_path)) and k_title:
+                title = format_header_title(k_title, artist) or k_title
+        album = format_album_line(mf.get("album", "") or k_fields.get("album", ""), mf.get("year", 0))
         sub_line = "No active playback" if idle else (" - ".join([p for p in (artist, album) if p]) or "Unknown")
         vol = max(0, min(100, int(round(float(self.mpv_state.get("volume") or 100)))))
         muted = bool(self.mpv_state.get("mute", False))
@@ -1737,6 +1758,11 @@ class SovereignDashboard:
             self.scroll_top = self.selected_idx - body_h + 1
 
         self.add_hitbox(x0 + 1, body_y, x0 + w - 1, y0 + h - 1, "focus_pane", "list")
+        q_pl = (
+            (self.mpv_state or {}).get("playlist") or []
+            if self.active_tab == "queue" and not getattr(self, "nav_stack", None)
+            else []
+        )
         for row_i in range(body_h):
             ry = body_y + row_i
             self.safe_addstr(ry, x0, "│", border_attr)
@@ -1745,7 +1771,8 @@ class SovereignDashboard:
             if idx < len(self.tracks):
                 vid, title, meta, tag = self.tracks[idx]
                 is_sel = idx == self.selected_idx
-                marker = "▸" if is_sel else " "
+                is_cur_q = 0 <= idx < len(q_pl) and isinstance(q_pl[idx], dict) and bool(q_pl[idx].get("current"))
+                marker = "▸" if is_sel else (">" if is_cur_q else " ")
                 fav_mark = "*" if vid in self.fav_ids else " "
                 prefix = f"{marker}{idx + 1:2d}.{fav_mark} "
                 if use_4col:
@@ -1760,7 +1787,8 @@ class SovereignDashboard:
                     text = format_track_row_columns(title, meta, rem_w)
                     pad = max(0, inner_w - len(prefix) - display_width(text) - len(tag_str))
                     line = f"{prefix}{text}{' ' * pad}{tag_str}"
-                attr = curses.color_pair(PAIR_SEL if is_sel else PAIR_DEFAULT) | (curses.A_BOLD if is_sel else 0)
+                row_pair = PAIR_SEL if is_sel else (PAIR_GREEN if is_cur_q else PAIR_DEFAULT)
+                attr = curses.color_pair(row_pair) | (curses.A_BOLD if (is_sel or is_cur_q) else 0)
                 self.safe_addstr(ry, x0 + 1, line, attr)
                 if not is_sel and fav_mark == "*":
                     self.safe_addstr(ry, x0 + 5, "*", curses.color_pair(PAIR_AMBER) | curses.A_BOLD)
@@ -2333,16 +2361,33 @@ class SovereignDashboard:
         if layout and layout.get("drawer") is None:
             self.active_modal = "downloads"
 
+    def _maybe_fetch_lyrics_for(self, cur_path: str, title: str, artist: str, dur: float) -> None:
+        if not cur_path:
+            return
+        vid = extract_video_id(cur_path)
+        k_title, k_fields = self._lookup_known_track_meta(cur_path)
+        eff_title = (
+            k_title
+            if (is_placeholder_title(title, vid) and k_title and not is_placeholder_title(k_title, vid))
+            else title
+        )
+        if is_placeholder_title(eff_title, vid):
+            self.lyrics_header = "Waiting for track metadata..."
+            return
+        eff_artist = artist or str(k_fields.get("artist") or "")
+        eff_dur = dur if dur > 0 else float(k_fields.get("duration") or 0.0)
+        same_track = self.lyrics_track_key == cur_path
+        need_initial = not same_track and not self.lyrics_loading
+        need_artist_upgrade = same_track and not getattr(self, "lyrics_artist", "") and bool(eff_artist)
+        if need_initial or need_artist_upgrade:
+            self.fetch_lyrics_async(eff_title, cur_path, artist=eff_artist, duration=eff_dur)
+
     def _ensure_lyrics_for_current(self) -> None:
         title = str(self.mpv_state.get("media-title") or "")
         cur_path = str(self.mpv_state.get("path") or "")
         artist = extract_primary_artist(self.mpv_state.get("metadata"))
         dur = float(self.mpv_state.get("duration") or 0.0)
-        if cur_path and cur_path != self.lyrics_track_key and not self.lyrics_loading:
-            if is_placeholder_title(title, extract_video_id(cur_path)):
-                self.lyrics_header = "Waiting for track metadata..."
-            else:
-                self.fetch_lyrics_async(title, cur_path, artist=artist, duration=dur)
+        self._maybe_fetch_lyrics_for(cur_path, title, artist, dur)
 
     def _maybe_requery_search(self) -> bool:
         q = (getattr(self, "search_query", "") or "").strip()
