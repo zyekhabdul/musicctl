@@ -70,6 +70,7 @@ from tui_widgets import (
     format_table_header,
     format_table_row_4col,
     format_track_row_columns,
+    hint_action_for_key,
     is_downloadable_ref,
     is_placeholder_title,
     merge_fav_and_history,
@@ -660,6 +661,19 @@ class SovereignDashboard:
         if etype == "song":
             row_id = eid if src == "ytm" else catalog.format_ref(src, "song", eid)
             tag = f"[{src.upper()}]"
+            art_id = str(ent.get("artist_id") or "").strip()
+            alb_id = str(ent.get("album_id") or "").strip()
+            links: dict[str, tuple[str, str]] = {}
+            if art_id and artist:
+                links["artist"] = (catalog.format_ref(src, "artist", art_id), artist)
+            if alb_id and album:
+                links["album"] = (catalog.format_ref(src, "album", alb_id), album)
+            if links:
+                row_links = getattr(self, "_row_links", None)
+                if row_links is None:
+                    row_links = {}
+                    self._row_links = row_links
+                row_links[row_id] = links
         elif etype == "album":
             row_id = catalog.format_ref(src, "album", eid)
             tag = "[ALB]"
@@ -1751,6 +1765,41 @@ class SovereignDashboard:
                 if not is_sel and fav_mark == "*":
                     self.safe_addstr(ry, x0 + 5, "*", curses.color_pair(PAIR_AMBER) | curses.A_BOLD)
                 self.add_hitbox(x0 + 1, ry, x0 + w - 1, ry + 1, "row", idx)
+                if use_4col:
+                    links = getattr(self, "_row_links", {}).get(vid)
+                    cols = compute_table_col_widths(col_w)
+                    if links and cols is not None:
+                        aw, tw, bw, _dw = cols
+                        art_x = x0 + 1 + display_width(prefix)
+                        alb_x = art_x + aw + 2 + tw + 2
+                        if "artist" in links and art_s != "-":
+                            art_disp = truncate_width(art_s, aw)
+                            art_w = display_width(art_disp)
+                            if art_w > 0:
+                                if is_sel:
+                                    self.safe_addstr(ry, art_x, art_disp, attr | curses.A_UNDERLINE)
+                                self.add_hitbox(
+                                    art_x,
+                                    ry,
+                                    art_x + art_w,
+                                    ry + 1,
+                                    "browse_link",
+                                    (idx, "artist", links["artist"][0], links["artist"][1]),
+                                )
+                        if "album" in links and alb_s != "-":
+                            alb_disp = truncate_width(alb_s, bw)
+                            alb_w = display_width(alb_disp)
+                            if alb_w > 0:
+                                if is_sel:
+                                    self.safe_addstr(ry, alb_x, alb_disp, attr | curses.A_UNDERLINE)
+                                self.add_hitbox(
+                                    alb_x,
+                                    ry,
+                                    alb_x + alb_w,
+                                    ry + 1,
+                                    "browse_link",
+                                    (idx, "album", links["album"][0], links["album"][1]),
+                                )
             else:
                 if row_i == 0 and not self.tracks:
                     msg = " Searching..." if getattr(self, "search_loading", False) else " Empty. Press / or click Search above."
@@ -1905,12 +1954,26 @@ class SovereignDashboard:
                     info_rows.append((f"Album: {sel_alb}", curses.color_pair(PAIR_ICE)))
                 info_rows.append((f"Info : {smeta or '-'}", curses.color_pair(PAIR_ICE)))
                 info_rows.append((f"ID   : {svid} {stag}", curses.color_pair(PAIR_PURPLE)))
+                alb_link = getattr(self, "_row_links", {}).get(svid, {}).get("album")
                 max_text_rows = max(1, b_inner_h - 1)
                 start_r = min(max(0, len(info_rows) - max_text_rows), d_scroll)
                 drawn = 0
                 for ri in range(start_r, min(len(info_rows), start_r + max_text_rows)):
                     txt, attr = info_rows[ri]
-                    self.safe_addstr(y0 + 1 + drawn, x0 + 2, truncate_width(txt, b_inner_w), attr)
+                    row_y = y0 + 1 + drawn
+                    is_alb_row = txt.startswith("Album: ") and alb_link is not None
+                    row_attr = attr | (curses.A_UNDERLINE if is_alb_row else 0)
+                    disp_txt = truncate_width(txt, b_inner_w)
+                    self.safe_addstr(row_y, x0 + 2, disp_txt, row_attr)
+                    if is_alb_row and alb_link is not None:
+                        self.add_hitbox(
+                            x0 + 2,
+                            row_y,
+                            x0 + 2 + max(1, display_width(disp_txt)),
+                            row_y + 1,
+                            "browse_link",
+                            (self.selected_idx, "album", alb_link[0], alb_link[1]),
+                        )
                     drawn += 1
                 if b_inner_h >= drawn + 1:
                     ax = x0 + 2
@@ -1946,10 +2009,16 @@ class SovereignDashboard:
             need = len(k_txt) + 1 + len(lbl) + 2
             if cx + need > w:
                 break
+            start_x = cx
             self.safe_addstr(y, cx, k_txt, curses.color_pair(PAIR_CYAN) | curses.A_BOLD)
             cx += len(k_txt) + 1
             self.safe_addstr(y, cx, lbl, curses.color_pair(PAIR_DIM))
-            cx += len(lbl) + 2
+            cx += len(lbl)
+            if not getattr(self, "active_modal", "") and not self.show_help:
+                mapped = hint_action_for_key(k_txt, lbl)
+                if mapped is not None:
+                    self.add_hitbox(start_x, y, cx, y + 1, mapped[0], mapped[1])
+            cx += 2
 
     def render_rmpc_footer(self, layout: dict[str, Any]) -> None:
         fy, fh, _fx0, fw = layout["footer"]
@@ -2108,10 +2177,24 @@ class SovereignDashboard:
             info_rows.append((f"Album: {sel_alb}", curses.color_pair(PAIR_ICE)))
         info_rows.append((f"Info : {smeta or '-'}", curses.color_pair(PAIR_ICE)))
         info_rows.append((f"ID   : {svid} {stag}", curses.color_pair(PAIR_PURPLE)))
+        alb_link = getattr(self, "_row_links", {}).get(svid, {}).get("album")
         max_rows = max(1, b_in_h - 1)
         drawn = 0
         for txt, attr in info_rows[:max_rows]:
-            self.safe_addstr(y0 + 1 + drawn, x0 + 2, truncate_width(txt, b_in_w), attr)
+            row_y = y0 + 1 + drawn
+            is_alb_row = txt.startswith("Album: ") and alb_link is not None
+            row_attr = attr | (curses.A_UNDERLINE if is_alb_row else 0)
+            disp_txt = truncate_width(txt, b_in_w)
+            self.safe_addstr(row_y, x0 + 2, disp_txt, row_attr)
+            if is_alb_row and alb_link is not None:
+                self.add_hitbox(
+                    x0 + 2,
+                    row_y,
+                    x0 + 2 + max(1, display_width(disp_txt)),
+                    row_y + 1,
+                    "browse_link",
+                    (self.selected_idx, "album", alb_link[0], alb_link[1]),
+                )
             drawn += 1
         if b_in_h >= drawn + 1:
             ax = x0 + 2
@@ -2420,6 +2503,33 @@ class SovereignDashboard:
         elif action == "clear_search":
             self.search_query = ""
             self.search_focus = True
+        elif action == "blur_search":
+            self.search_focus = False
+        elif action == "browse_link":
+            if (
+                bstate
+                and (bstate & curses.BUTTON1_RELEASED)
+                and not (
+                    bstate
+                    & (
+                        curses.BUTTON1_CLICKED
+                        | curses.BUTTON1_PRESSED
+                        | curses.BUTTON1_DOUBLE_CLICKED
+                        | curses.BUTTON3_CLICKED
+                        | curses.BUTTON3_PRESSED
+                    )
+                )
+            ):
+                return
+            idx, _kind, ref, label = payload
+            self.search_focus = False
+            self.active_modal = ""
+            self.focus_pane = "list"
+            self.selected_idx = int(idx)
+            if bstate & (curses.BUTTON3_CLICKED | curses.BUTTON3_PRESSED):
+                self.run_cli_async(["add", ref], toast=f"Queued: {label[:24]}", reload_after=True)
+            else:
+                self.trigger_browse(ref, label)
         elif action == "row":
             self.search_focus = False
             self.focus_pane = "list"
