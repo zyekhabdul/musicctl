@@ -123,6 +123,8 @@ def make_entity(
     isrc: str = "",
     artist: str = "",
     album: str = "",
+    artist_id: str = "",
+    album_id: str = "",
     track_num: int = 0,
     year: int = 0,
     duration: int = 0,
@@ -138,6 +140,8 @@ def make_entity(
         "title": _clean_text(title),
         "artist": _clean_text(artist),
         "album": _clean_text(album),
+        "artist_id": _clean_text(artist_id),
+        "album_id": _clean_text(album_id),
         "track_num": max(0, _safe_int(track_num, 0)),
         "year": max(0, _safe_int(year, 0)),
         "duration": max(0, _safe_int(duration, 0)),
@@ -346,6 +350,34 @@ def _ytm_browse_type_from_id(browse_id: str, fallback: str = "playlist") -> str:
     return fallback
 
 
+def _extract_ytm_run_links(flex: list[Any]) -> tuple[str, str]:
+    """Extract first (artist_id, album_id) browse IDs from YTM flexColumns runs."""
+    artist_id = ""
+    album_id = ""
+    for col in flex[1:]:
+        if not isinstance(col, dict):
+            continue
+        runs = col.get("musicResponsiveListItemFlexColumnRenderer", {}).get("text", {}).get("runs") or []
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            bep = (run.get("navigationEndpoint") or {}).get("browseEndpoint") or {}
+            bid = str(bep.get("browseId") or "").strip()
+            if not bid:
+                continue
+            ptype = (
+                bep.get("browseEndpointContextSupportedConfigs", {})
+                .get("browseEndpointContextMusicConfig", {})
+                .get("pageType")
+                or ""
+            )
+            if not artist_id and (ptype == "MUSIC_PAGE_TYPE_ARTIST" or bid.startswith("UC")):
+                artist_id = bid
+            elif not album_id and (ptype == "MUSIC_PAGE_TYPE_ALBUM" or bid.startswith(("MPREb_", "OLAK5uy_"))):
+                album_id = bid
+    return artist_id, album_id
+
+
 def parse_ytm_search(data: Any, search_type: str = "songs") -> list[dict[str, Any]]:
     """Parse InnerTube search JSON into canonical entities."""
     if not isinstance(data, dict):
@@ -418,9 +450,12 @@ def parse_ytm_search(data: Any, search_type: str = "songs") -> list[dict[str, An
 
         artist = ""
         album = ""
+        artist_id = ""
+        album_id = ""
         if etype == "song":
             artist = tokens[0] if tokens else ""
             album = tokens[1] if len(tokens) > 1 else ""
+            artist_id, album_id = _extract_ytm_run_links(flex)
         elif etype == "album":
             artist = tokens[0] if tokens else ""
         elif etype == "artist":
@@ -437,6 +472,8 @@ def parse_ytm_search(data: Any, search_type: str = "songs") -> list[dict[str, An
                 title=title,
                 artist=artist,
                 album=album,
+                artist_id=artist_id,
+                album_id=album_id,
                 year=year,
                 duration=dur,
                 cover_url=cover,
@@ -614,6 +651,14 @@ def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
 
         artist = tokens[0] if tokens else hdr_artist
         album = (tokens[1] if len(tokens) > 1 else "") or hdr_album
+        artist_id = ""
+        album_id = ""
+        if etype == "song":
+            artist_id, album_id = _extract_ytm_run_links(flex)
+            if not album_id and header["type"] == "album":
+                album_id = str(header.get("id") or "")
+            if not artist_id and header["type"] == "artist":
+                artist_id = str(header.get("id") or "")
         cover = _best_thumbnail_url(renderer.get("thumbnail")) or hdr_cover
 
         items.append(
@@ -624,6 +669,8 @@ def parse_ytm_browse(data: Any, browse_id: str) -> dict[str, Any]:
                 title=title,
                 artist=artist,
                 album=album,
+                artist_id=artist_id,
+                album_id=album_id,
                 track_num=track_num,
                 year=year or hdr_year,
                 duration=dur,
@@ -763,6 +810,8 @@ def parse_deezer_track(obj: dict[str, Any], album_ctx: dict[str, Any] | None = N
     art = obj.get("artist") if isinstance(obj.get("artist"), dict) else {}
     artist_name = str(art.get("name") or (album_ctx or {}).get("artist") or "")
     album_title = str(alb.get("title") or (album_ctx or {}).get("title") or "")
+    artist_id = str(art.get("id") or (album_ctx or {}).get("artist_id") or "")
+    album_id = str(alb.get("id") or (album_ctx or {}).get("id") or "")
     year = _parse_year_prefix(obj.get("release_date") or alb.get("release_date") or (album_ctx or {}).get("release_date"))
     cover = _upgrade_deezer_cover(alb) or _upgrade_deezer_cover(album_ctx) or _upgrade_deezer_cover(art)
     return make_entity(
@@ -773,6 +822,8 @@ def parse_deezer_track(obj: dict[str, Any], album_ctx: dict[str, Any] | None = N
         title=str(obj.get("title") or obj.get("title_short") or ""),
         artist=artist_name,
         album=album_title,
+        artist_id=artist_id,
+        album_id=album_id,
         track_num=_safe_int(obj.get("track_position"), 0),
         year=year,
         duration=_safe_int(obj.get("duration"), 0),
@@ -904,8 +955,10 @@ def browse_deezer(etype: str, eid: str) -> dict[str, Any]:
         raw = _http_get_json(f"https://api.deezer.com/album/{eid}")
         ent = parse_deezer_album(raw)
         ctx = {
+            "id": ent["id"],
             "title": ent["title"],
             "artist": ent["artist"],
+            "artist_id": str((raw.get("artist") or {}).get("id") or ""),
             "release_date": raw.get("release_date"),
             "cover_xl": ent["cover_url"],
         }
@@ -943,6 +996,8 @@ def _itunes_track_entity(row: dict[str, Any]) -> dict[str, Any]:
         title=str(row.get("trackName") or ""),
         artist=str(row.get("artistName") or ""),
         album=str(row.get("collectionName") or ""),
+        artist_id=str(row.get("artistId") or ""),
+        album_id=str(row.get("collectionId") or ""),
         track_num=_safe_int(row.get("trackNumber"), 0),
         year=_parse_year_prefix(row.get("releaseDate")),
         duration=int(round(_safe_int(row.get("trackTimeMillis"), 0) / 1000.0)),
@@ -1130,8 +1185,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.subtype == "album":
                     ent = parse_deezer_album(raw)
                     ctx = {
+                        "id": ent["id"],
                         "title": ent["title"],
                         "artist": ent["artist"],
+                        "artist_id": str((raw.get("artist") or {}).get("id") or ""),
                         "release_date": raw.get("release_date"),
                         "cover_xl": ent["cover_url"],
                     }
